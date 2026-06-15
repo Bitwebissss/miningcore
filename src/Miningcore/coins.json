@@ -170,7 +170,7 @@
     "explorerTxLink": "https://explorer.bitwebcore.net/tx/{0}",
     "explorerAccountLink": "https://explorer.bitwebcore.net/address/{0}",
     "extendedMaturity": {
-      "startHeight": 200,
+      "startHeight": 60000,
       "periodLength": 9300
     }
   }
