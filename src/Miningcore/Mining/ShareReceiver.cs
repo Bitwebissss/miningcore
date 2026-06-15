@@ -13,17 +13,16 @@ using Miningcore.Messaging;
 using Miningcore.Notifications.Messages;
 using Miningcore.Time;
 using Miningcore.Util;
+using NetMQ;
+using NetMQ.Sockets;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Serialization;
 using NLog;
 using ProtoBuf;
-using ZeroMQ;
 
 namespace Miningcore.Mining;
 
-/// <summary>
-/// Receives external shares from relays and re-publishes for consumption
-/// </summary>
+/// <summary>Receives external shares from relays and re-publishes for consumption.</summary>
 public class ShareReceiver : BackgroundService
 {
     public ShareReceiver(
@@ -45,7 +44,7 @@ public class ShareReceiver : BackgroundService
     private readonly ClusterConfig clusterConfig;
     private readonly CompositeDisposable disposables = new();
     private readonly ConcurrentDictionary<string, PoolContext> pools = new();
-    private readonly BufferBlock<(string Url, ZMessage Message)> queue = new();
+    private readonly BufferBlock<(string Url, NetMQMessage Message)> queue = new();
 
     readonly JsonSerializer serializer = new()
     {
@@ -78,82 +77,55 @@ public class ShareReceiver : BackgroundService
             AttachPool(notification.Pool);
     }
 
+    private static SubscriberSocket SetupSubSocket(ShareRelayEndpointConfig relay, bool silent = false)
+    {
+        var sub = new SubscriberSocket();
+        sub.SetupCurveTlsClient(relay.SharedEncryptionKey, logger);
+        sub.Connect(relay.Url);
+        sub.SubscribeToAnyTopic();
+
+        if(!silent)
+        {
+            if(sub.Options.CurveServerKey != null && sub.Options.CurveServerKey.Any(x => x != 0))
+                logger.Info($"Monitoring external stratum {relay.Url} using key {sub.Options.CurveServerKey.ToHexString()}");
+            else
+                logger.Info($"Monitoring external stratum {relay.Url}");
+        }
+
+        return sub;
+    }
+
     private Task StartMessageReceiver(CancellationToken ct)
     {
-        return Task.Run(() =>
-        {
-            Thread.CurrentThread.Name = "ShareReceiver Socket Poller";
-            var timeout = TimeSpan.FromMilliseconds(5000);
-            var reconnectTimeout = TimeSpan.FromSeconds(60);
+        var relays = clusterConfig.ShareRelays
+            .DistinctBy(x => $"{x.Url}:{x.SharedEncryptionKey}")
+            .ToArray();
 
-            var relays = clusterConfig.ShareRelays
-                .DistinctBy(x => $"{x.Url}:{x.SharedEncryptionKey}")
-                .ToArray();
+        var tasks = relays.Select(relay => Task.Run(() =>
+        {
+            var reconnectTimeout = TimeSpan.FromSeconds(60);
+            var receiveTimeout   = TimeSpan.FromMilliseconds(5000);
 
             while(!ct.IsCancellationRequested)
             {
-                // track last message received per endpoint
-                var lastMessageReceived = relays.Select(_ => clock.Now).ToArray();
+                var lastReceived = clock.Now;
 
                 try
                 {
-                    // setup sockets
-                    var sockets = relays.Select(x=> SetupSubSocket(x)).ToArray();
+                    using var sub = SetupSubSocket(relay);
 
-                    using(new CompositeDisposable(sockets))
+                    while(!ct.IsCancellationRequested)
                     {
-                        var pollItems = sockets.Select(_ => ZPollItem.CreateReceiver()).ToArray();
-
-                        while(!ct.IsCancellationRequested)
+                        var msg = new NetMQMessage();
+                        if(sub.TryReceiveMultipartMessage(receiveTimeout, ref msg, 3))
                         {
-                            if(sockets.PollIn(pollItems, out var messages, out var error, timeout))
-                            {
-                                for(var i = 0; i < messages.Length; i++)
-                                {
-                                    var msg = messages[i];
-
-                                    if(msg != null)
-                                    {
-                                        lastMessageReceived[i] = clock.Now;
-
-                                        queue.Post((relays[i].Url, msg));
-                                    }
-
-                                    else if(clock.Now - lastMessageReceived[i] > reconnectTimeout)
-                                    {
-                                        // re-create socket
-                                        sockets[i].Dispose();
-                                        sockets[i] = SetupSubSocket(relays[i], true);
-
-                                        // reset clock
-                                        lastMessageReceived[i] = clock.Now;
-
-                                        logger.Info(() => $"Receive timeout of {reconnectTimeout.TotalSeconds} seconds exceeded. Re-connecting to {relays[i].Url} ...");
-                                    }
-                                }
-
-                                if(error != null)
-                                    logger.Error(() => $"{nameof(ShareReceiver)}: {error.Name} [{error.Name}] during receive");
-                            }
-
-                            else
-                            {
-                                // check for timeouts
-                                for(var i = 0; i < messages.Length; i++)
-                                {
-                                    if(clock.Now - lastMessageReceived[i] > reconnectTimeout)
-                                    {
-                                        // re-create socket
-                                        sockets[i].Dispose();
-                                        sockets[i] = SetupSubSocket(relays[i], true);
-
-                                        // reset clock
-                                        lastMessageReceived[i] = clock.Now;
-
-                                        logger.Info(() => $"Receive timeout of {reconnectTimeout.TotalSeconds} seconds exceeded. Re-connecting to {relays[i].Url} ...");
-                                    }
-                                }
-                            }
+                            lastReceived = clock.Now;
+                            queue.Post((relay.Url, msg));
+                        }
+                        else if(clock.Now - lastReceived > reconnectTimeout)
+                        {
+                            logger.Info(() => $"Receive timeout exceeded. Re-connecting to {relay.Url} ...");
+                            break;
                         }
                     }
                 }
@@ -166,31 +138,21 @@ public class ShareReceiver : BackgroundService
                         Thread.Sleep(5000);
                 }
             }
-        }, ct);
-    }
+        }, ct));
 
-    private static ZSocket SetupSubSocket(ShareRelayEndpointConfig relay, bool silent = false)
-    {
-        var subSocket = new ZSocket(ZSocketType.SUB);
-        subSocket.SetupCurveTlsClient(relay.SharedEncryptionKey, logger);
-        subSocket.Connect(relay.Url);
-        subSocket.SubscribeAll();
-
-        if(!silent)
-        {
-            if(subSocket.CurveServerKey != null)
-                logger.Info($"Monitoring external stratum {relay.Url} using key {subSocket.CurveServerKey.ToHexString()}");
-            else
-                logger.Info($"Monitoring external stratum {relay.Url}");
-        }
-
-        return subSocket;
+        return Task.WhenAll(tasks);
     }
 
     private Task StartMessageProcessors(CancellationToken ct)
     {
-        var tasks = Enumerable.Repeat(ProcessMessages(ct), Environment.ProcessorCount);
-
+        // FIX: Enumerable.Repeat(ProcessMessages(ct), N) evaluated ProcessMessages(ct)
+        // exactly ONCE and handed the same Task reference N times to Task.WhenAll.
+        // Task.WhenAll on N copies of the same task is equivalent to waiting for
+        // that one task — so only a single processor was running regardless of
+        // Environment.ProcessorCount.
+        // Correct pattern: Range + Select invokes ProcessMessages independently N times.
+        var tasks = Enumerable.Range(0, Environment.ProcessorCount)
+            .Select(_ => ProcessMessages(ct));
         return Task.WhenAll(tasks);
     }
 
@@ -201,11 +163,16 @@ public class ShareReceiver : BackgroundService
             try
             {
                 var (url, msg) = await queue.ReceiveAsync(ct);
+                ProcessMessage(url, msg);
+            }
 
-                using(msg)
-                {
-                    ProcessMessage(url, msg);
-                }
+            // FIX: OperationCanceledException is thrown by ReceiveAsync when ct fires
+            // (normal application shutdown).  Catching it with the generic handler below
+            // caused a spurious Error log entry on every clean shutdown.
+            // Handle it explicitly and silently.
+            catch(OperationCanceledException)
+            {
+                // Normal shutdown – do not log as error.
             }
 
             catch(Exception ex)
@@ -215,14 +182,12 @@ public class ShareReceiver : BackgroundService
         }
     }
 
-    private void ProcessMessage(string url, ZMessage msg)
+    private void ProcessMessage(string url, NetMQMessage msg)
     {
-        // extract frames
-        var topic = msg[0].ToString(Encoding.UTF8);
-        var flags = msg[1].ReadUInt32();
-        var data = msg[2].Read();
+        var topic = msg[0].ConvertToString(Encoding.UTF8);
+        var flags = BitConverter.ToUInt32(msg[1].ToByteArray(), 0);
+        var data  = msg[2].ToByteArray();
 
-        // validate
         if(string.IsNullOrEmpty(topic) || !pools.TryGetValue(topic, out var poolContext))
         {
             logger.Warn(() => $"Received share for pool '{topic}' which is not known locally. Ignoring ...");
@@ -235,11 +200,12 @@ public class ShareReceiver : BackgroundService
             return;
         }
 
-        // TMP FIX
+        // Wire format flags are sent as little-endian by the relay.
+        // If the low nibble is zero the bytes arrived in big-endian order
+        // (older relay version) – swap them before extracting the format bits.
         if((flags & ShareRelay.WireFormatMask) == 0)
             flags = BitConverter.ToUInt32(BitConverter.GetBytes(flags).ToNewReverseArray());
 
-        // deserialize
         var wireFormat = (ShareRelay.WireFormat) (flags & ShareRelay.WireFormatMask);
 
         Share share = null;
@@ -249,15 +215,10 @@ public class ShareReceiver : BackgroundService
             case ShareRelay.WireFormat.Json:
                 using(var stream = new MemoryStream(data))
                 {
-                    using(var reader = new StreamReader(stream, Encoding.UTF8))
-                    {
-                        using(var jreader = new JsonTextReader(reader))
-                        {
-                            share = serializer.Deserialize<Share>(jreader);
-                        }
-                    }
+                    using var reader  = new StreamReader(stream, Encoding.UTF8);
+                    using var jreader = new JsonTextReader(reader);
+                    share = serializer.Deserialize<Share>(jreader);
                 }
-
                 break;
 
             case ShareRelay.WireFormat.ProtocolBuffers:
@@ -266,7 +227,6 @@ public class ShareReceiver : BackgroundService
                     share = Serializer.Deserialize<Share>(stream);
                     share.BlockReward = (decimal) share.BlockRewardDouble;
                 }
-
                 break;
 
             default:
@@ -280,40 +240,42 @@ public class ShareReceiver : BackgroundService
             return;
         }
 
-        // store
-        share.PoolId = topic;
+        share.PoolId  = topic;
         share.Created = clock.Now;
         messageBus.SendMessage(share);
 
-        // update poolstats from shares
-        if(poolContext != null)
+        // poolContext is guaranteed non-null here: the TryGetValue early-return above
+        // ensures we only reach this point when the pool was found.
+        var pool            = poolContext.Pool;
+        var shareMultiplier = poolContext.Pool.ShareMultiplier;
+
+        poolContext.Logger.Info(() => $"External {(!string.IsNullOrEmpty(share.Source) ? $"[{share.Source.ToUpper()}] " : string.Empty)}share accepted: D={Math.Round(share.Difficulty * shareMultiplier, 4)}");
+
+        messageBus.SendTelemetry(share.PoolId, TelemetryCategory.Share, TimeSpan.Zero, true);
+
+        if(pool.NetworkStats != null)
         {
-            var pool = poolContext.Pool;
-            var shareMultiplier = poolContext.Pool.ShareMultiplier;
-
-            poolContext.Logger.Info(() => $"External {(!string.IsNullOrEmpty(share.Source) ? $"[{share.Source.ToUpper()}] " : string.Empty)}share accepted: D={Math.Round(share.Difficulty * shareMultiplier, 4)}");
-
-            messageBus.SendTelemetry(share.PoolId, TelemetryCategory.Share, TimeSpan.Zero, true);
-
-            if(pool.NetworkStats != null)
+            // Use BlockchainStats.SyncRoot as the shared lock — the same object that
+            // BitcoinJobManager.UpdateJob (Rx Concat chain #1) and
+            // UpdateNetworkStatsAsync (Rx Concat chain #2) now lock on.
+            // All three execution contexts write overlapping fields of the same
+            // BlockchainStats instance; they must all lock on the same monitor.
+            lock(pool.NetworkStats.SyncRoot)
             {
-                pool.NetworkStats.BlockHeight = (ulong) share.BlockHeight;
+                pool.NetworkStats.BlockHeight       = (ulong) share.BlockHeight;
                 pool.NetworkStats.NetworkDifficulty = share.NetworkDifficulty;
 
                 if(poolContext.BlockHeight != share.BlockHeight)
                 {
                     pool.NetworkStats.LastNetworkBlockTime = clock.Now;
                     poolContext.BlockHeight = share.BlockHeight;
-                    poolContext.LastBlock = clock.Now;
+                    poolContext.LastBlock   = clock.Now;
                 }
 
                 else
                     pool.NetworkStats.LastNetworkBlockTime = poolContext.LastBlock;
             }
         }
-
-        else
-            logger.Info(() => $"External {(!string.IsNullOrEmpty(share.Source) ? $"[{share.Source.ToUpper()}] " : string.Empty)}share accepted: D={Math.Round(share.Difficulty, 4)}");
     }
 
     protected override async Task ExecuteAsync(CancellationToken ct)
@@ -322,12 +284,10 @@ public class ShareReceiver : BackgroundService
         {
             try
             {
-                // monitor pool lifetime
                 disposables.Add(messageBus.Listen<PoolStatusNotification>()
                     .ObserveOn(TaskPoolScheduler.Default)
                     .Subscribe(OnPoolStatusNotification));
 
-                // process messages
                 await Task.WhenAll(
                     StartMessageReceiver(ct),
                     StartMessageProcessors(ct));

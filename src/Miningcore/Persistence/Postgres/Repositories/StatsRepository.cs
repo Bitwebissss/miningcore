@@ -1,5 +1,5 @@
 using System.Data;
-using AutoMapper;
+using MapsterMapper;
 using Dapper;
 using Miningcore.Persistence.Model;
 using Miningcore.Persistence.Model.Projections;
@@ -62,19 +62,24 @@ public class StatsRepository : IStatsRepository
         return con.ExecuteScalarAsync<decimal>(new CommandDefinition(query, new { poolId }, cancellationToken: ct));
     }
 
+    // Whitelist map: only known enum values can enter the SQL template.
+    // This prevents any future code from accidentally interpolating user input here.
+    private static readonly IReadOnlyDictionary<SampleInterval, string> TruncMap =
+        new Dictionary<SampleInterval, string>
+        {
+            { SampleInterval.Hour, "hour" },
+            { SampleInterval.Day,  "day"  }
+        };
+
     public async Task<PoolStats[]> GetPoolPerformanceBetweenAsync(IDbConnection con, string poolId,
         SampleInterval interval, DateTime start, DateTime end, CancellationToken ct)
     {
-        var trunc = interval switch
-        {
-            SampleInterval.Hour => "hour",
-            SampleInterval.Day => "day",
-            _ => null
-        };
+        if(!TruncMap.TryGetValue(interval, out var trunc))
+            throw new ArgumentOutOfRangeException(nameof(interval), $"Unsupported SampleInterval value: {interval}");
 
         var query = @$"SELECT date_trunc('{trunc}', created) AS created,
             AVG(poolhashrate) AS poolhashrate, AVG(networkhashrate) AS networkhashrate, AVG(networkdifficulty) AS networkdifficulty,
-            CAST(AVG(connectedminers) AS BIGINT) AS connectedminers
+            CAST(AVG(connectedminers) AS BIGINT) AS connectedminers, AVG(sharespersecond) AS sharespersecond
             FROM poolstats
             WHERE poolid = @poolId AND created >= @start AND created <= @end
             GROUP BY date_trunc('{trunc}', created)
@@ -195,7 +200,7 @@ public class StatsRepository : IStatsRepository
             entity.Worker ??= string.Empty;
 
             // adjust creation time by partition
-            entity.Created = entity.Created.AddMinutes(3 * entity.Partition);
+            entity.Created = entity.Created.AddMinutes(3.0 * entity.Partition);
         }
 
         // group
@@ -314,31 +319,26 @@ public class StatsRepository : IStatsRepository
         return tmp;
     }
 
-    public async Task<MinerWorkerPerformanceStats[]> PagePoolMinersByHashrateAsync(IDbConnection con, string poolId,
-        DateTime from, int page, int pageSize, CancellationToken ct)
+    public Task<int> GetPoolWorkerCountAsync(IDbConnection con, string poolId, DateTime from, CancellationToken ct)
     {
+        // Count distinct (miner, worker) pairs that reported stats since @from
         const string query =
-            @"WITH tmp AS
-            (
-                SELECT
-                    ms.miner,
-                    AVG(ms.hashrate) AS avg_hashrate,
-                    AVG(ms.sharespersecond) AS avg_sharespersecond,
-                    ROW_NUMBER() OVER(PARTITION BY ms.miner ORDER BY AVG(ms.hashrate) DESC) AS rk
-                FROM minerstats ms
-                WHERE ms.poolid = @poolid AND ms.created >= @from
-                GROUP BY ms.miner
-            )
-            SELECT t.miner, t.avg_hashrate AS hashrate, t.avg_sharespersecond AS sharespersecond
-            FROM tmp t
-            WHERE t.rk = 1
-            ORDER BY t.avg_hashrate DESC
-            OFFSET @offset FETCH NEXT @pageSize ROWS ONLY";
+            @"SELECT COUNT(DISTINCT miner || ':' || COALESCE(worker, ''))
+              FROM minerstats
+              WHERE poolid = @poolId AND created >= @from";
 
-        return (await con.QueryAsync<Entities.MinerWorkerPerformanceStats>(new CommandDefinition(query,
-                new { poolId, from, offset = page * pageSize, pageSize }, cancellationToken: ct)))
-            .Select(mapper.Map<MinerWorkerPerformanceStats>)
-            .ToArray();
+        return con.ExecuteScalarAsync<int>(new CommandDefinition(query, new { poolId, from }, cancellationToken: ct));
+    }
+
+    public Task<int> GetMinerWorkerCountAsync(IDbConnection con, string poolId, string miner, DateTime from, CancellationToken ct)
+    {
+        // Count distinct workers for a specific miner that reported stats since @from
+        const string query =
+            @"SELECT COUNT(DISTINCT COALESCE(worker, ''))
+              FROM minerstats
+              WHERE poolid = @poolId AND miner = @miner AND created >= @from";
+
+        return con.ExecuteScalarAsync<int>(new CommandDefinition(query, new { poolId, miner, from }, cancellationToken: ct));
     }
 
     public Task<int> DeletePoolStatsBeforeAsync(IDbConnection con, DateTime date, CancellationToken ct)
@@ -353,5 +353,26 @@ public class StatsRepository : IStatsRepository
         const string query = @"DELETE FROM minerstats WHERE created < @date";
 
         return con.ExecuteAsync(new CommandDefinition(query, new { date }, cancellationToken: ct));
+    }
+
+    public Task<uint> GetMinerTotalConfirmedBlocksAsync(IDbConnection con, string poolId, string miner, CancellationToken ct)
+    {
+        const string query = @"SELECT COUNT(*) FROM blocks WHERE poolid = @poolId AND miner = @miner AND status = 'confirmed'";
+
+        return con.ExecuteScalarAsync<uint>(new CommandDefinition(query, new { poolId, miner }, cancellationToken: ct));
+    }
+
+    public Task<uint> GetMinerTotalPendingBlocksAsync(IDbConnection con, string poolId, string miner, CancellationToken ct)
+    {
+        const string query = @"SELECT COUNT(*) FROM blocks WHERE poolid = @poolId AND miner = @miner AND status = 'pending'";
+
+        return con.ExecuteScalarAsync<uint>(new CommandDefinition(query, new { poolId, miner }, cancellationToken: ct));
+    }
+
+    public Task<uint> GetMinerTotalOrphanedBlocksAsync(IDbConnection con, string poolId, string miner, CancellationToken ct)
+    {
+        const string query = @"SELECT COUNT(*) FROM blocks WHERE poolid = @poolId AND miner = @miner AND status = 'orphaned'";
+
+        return con.ExecuteScalarAsync<uint>(new CommandDefinition(query, new { poolId, miner }, cancellationToken: ct));
     }
 }

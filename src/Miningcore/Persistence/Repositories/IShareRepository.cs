@@ -15,11 +15,12 @@ public interface IShareRepository
     Task<double?> GetAccumulatedShareDifficultyBetweenAsync(IDbConnection con, string poolId, DateTime start, DateTime end, CancellationToken ct);
     Task<double?> GetMinerShareDifficultyBetweenAsync(IDbConnection con, string poolId, string miner, DateTime start, DateTime end, CancellationToken ct);
     Task<double?> GetEffectiveAccumulatedShareDifficultyBetweenAsync(IDbConnection con, string poolId, DateTime start, DateTime end, CancellationToken ct);
-    Task<double?> GetEffortBetweenCreatedAsync(IDbConnection con, string poolId, DateTime start, DateTime end);
-    Task<double?> GetMinerEffortBetweenCreatedAsync(IDbConnection con, string poolId, string miner,DateTime start, DateTime end);
+    Task<double?> GetEffortBetweenCreatedAsync(IDbConnection con, string poolId, double shareConst, DateTime start, DateTime end, CancellationToken ct);
+    Task<double?> GetMinerEffortBetweenCreatedAsync(IDbConnection con, string poolId, string miner, DateTime start, DateTime end, CancellationToken ct);
     Task<MinerWorkerHashes[]> GetHashAccumulationBetweenAsync(IDbConnection con, string poolId, DateTime start, DateTime end, CancellationToken ct);
     Task<string[]> GetRecentyUsedIpAddressesAsync(IDbConnection con, IDbTransaction tx, string poolId, string miner, CancellationToken ct);
+    Task<string[]> GetRecentlyUsedPasswordsAsync(IDbConnection con, IDbTransaction tx, string poolId, string miner, CancellationToken ct);
 
     Task<KeyValuePair<string, double>[]> GetAccumulatedUserAgentShareDifficultyBetweenAsync(IDbConnection con, string poolId,
-        DateTime start, DateTime end, bool byVersione, CancellationToken ct);
+        DateTime start, DateTime end, bool byVersion, CancellationToken ct);
 }

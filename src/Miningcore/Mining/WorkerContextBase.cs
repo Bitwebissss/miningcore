@@ -49,6 +49,13 @@ public class WorkerContextBase
 
     public bool IsNicehash { get; private set; }
 
+    public virtual string Miner { get; set; }
+
+    /// <summary>
+    /// mpass= value from stratum password field, lives for the duration of the connection
+    /// </summary>
+    public string MinerPass { get; set; }
+
     public void Init(double difficulty, VarDiffConfig varDiffConfig, IMasterClock clock)
     {
         Difficulty = difficulty;

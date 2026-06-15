@@ -68,8 +68,8 @@ public static class CoinTemplateLoader
                 var coinId = definition.Key;
 
                 // log redefinitions
-                if(result.ContainsKey(coinId))
-                    logger.Warn($"Redefinition of coin '{coinId}' in file {filename}. First seen in {result[coinId].Source}");
+                if(result.TryGetValue(coinId, out var existing))
+                    logger.Warn($"Redefinition of coin '{coinId}' in file {filename}. First seen in {existing.Source}");
 
                 result[coinId] = definition.Value;
             }

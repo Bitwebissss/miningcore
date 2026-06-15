@@ -1,6 +1,6 @@
 using System.Data;
 using System.Data.Common;
-using AutoMapper;
+using MapsterMapper;
 using Miningcore.Configuration;
 using Miningcore.Extensions;
 using Miningcore.Messaging;
@@ -13,6 +13,7 @@ using Miningcore.Time;
 using Newtonsoft.Json;
 using NLog;
 using Polly;
+using Polly.Retry;
 using Contract = Miningcore.Contracts.Contract;
 
 namespace Miningcore.Payments;
@@ -59,7 +60,7 @@ public abstract class PayoutHandlerBase
     protected readonly IMasterClock clock;
     protected readonly IMessageBus messageBus;
     protected ClusterConfig clusterConfig;
-    private IAsyncPolicy faultPolicy;
+    private ResiliencePipeline faultPolicy;
 
     protected ILogger logger;
     protected PoolConfig poolConfig;
@@ -69,17 +70,27 @@ public abstract class PayoutHandlerBase
 
     protected void BuildFaultHandlingPolicy()
     {
-        var retry = Policy
-            .Handle<DbException>()
-            .Or<TimeoutException>()
-            .WaitAndRetryAsync(RetryCount, retryAttempt => TimeSpan.FromSeconds(Math.Pow(2, retryAttempt)), OnRetry);
-
-        faultPolicy = retry;
+        faultPolicy = new ResiliencePipelineBuilder()
+            .AddRetry(new RetryStrategyOptions
+            {
+                ShouldHandle = new PredicateBuilder()
+                    .Handle<DbException>()
+                    .Handle<TimeoutException>(),
+                MaxRetryAttempts = RetryCount,
+                DelayGenerator = args => ValueTask.FromResult<TimeSpan?>(
+                    TimeSpan.FromSeconds(Math.Pow(2, args.AttemptNumber + 1))),
+                OnRetry = args =>
+                {
+                    OnRetry(args.Outcome.Exception, args.RetryDelay, args.AttemptNumber + 1, null);
+                    return ValueTask.CompletedTask;
+                }
+            })
+            .Build();
     }
 
     protected virtual void OnRetry(Exception ex, TimeSpan timeSpan, int retry, object context)
     {
-        logger.Warn(() => $"[{LogCategory}] Retry {1} in {timeSpan} due to: {ex}");
+        logger.Warn(() => $"[{LogCategory}] Retry {retry} in {timeSpan} due to: {ex}");
     }
 
     public virtual async Task<decimal> UpdateBlockRewardBalancesAsync(IDbConnection con, IDbTransaction tx, IMiningPool pool, Block block, CancellationToken ct)
@@ -87,7 +98,7 @@ public abstract class PayoutHandlerBase
         var blockRewardRemaining = block.Reward;
 
         // Distribute funds to configured reward recipients
-        foreach(var recipient in poolConfig.RewardRecipients.Where(x => x.Percentage > 0))
+        foreach(var recipient in (poolConfig.RewardRecipients ?? Array.Empty<RewardRecipient>()).Where(x => x.Percentage > 0))
         {
             var amount = block.Reward * (recipient.Percentage / 100.0m);
             var address = recipient.Address;
@@ -114,13 +125,13 @@ public abstract class PayoutHandlerBase
 
         try
         {
-            await faultPolicy.ExecuteAsync(async () =>
+            await faultPolicy.ExecuteAsync(async _ =>
             {
                 await cf.RunTx(async (con, tx) =>
                 {
                     foreach(var balance in balances)
                     {
-                        if(!string.IsNullOrEmpty(transactionConfirmation) && poolConfig.RewardRecipients.All(x => x.Address != balance.Address))
+                        if(!string.IsNullOrEmpty(transactionConfirmation) && (poolConfig.RewardRecipients?.All(x => x.Address != balance.Address) != false))
                         {
                             // record payment
                             var payment = new Payment
@@ -141,7 +152,7 @@ public abstract class PayoutHandlerBase
                         await balanceRepo.AddAmountAsync(con, tx, poolConfig.Id, balance.Address, -balance.Amount, "Balance reset after payment");
                     }
                 });
-            });
+            }, CancellationToken.None);
         }
 
         catch(Exception ex)
@@ -161,7 +172,7 @@ public abstract class PayoutHandlerBase
 
         try
         {
-            await faultPolicy.ExecuteAsync(async () =>
+            await faultPolicy.ExecuteAsync(async _ =>
             {
                 await cf.RunTx(async (con, tx) =>
                 {
@@ -169,7 +180,7 @@ public abstract class PayoutHandlerBase
                     {
                         var (balance, transactionConfirmation) = kvp;
 
-                        if(!string.IsNullOrEmpty(transactionConfirmation) && poolConfig.RewardRecipients.All(x => x.Address != balance.Address))
+                        if(!string.IsNullOrEmpty(transactionConfirmation) && (poolConfig.RewardRecipients?.All(x => x.Address != balance.Address) != false))
                         {
                             // record payment
                             var payment = new Payment
@@ -190,7 +201,7 @@ public abstract class PayoutHandlerBase
                         await balanceRepo.AddAmountAsync(con, tx, poolConfig.Id, balance.Address, -balance.Amount, "Balance reset after payment");
                     }
                 });
-            });
+            }, CancellationToken.None);
         }
 
         catch(Exception ex)
@@ -221,13 +232,27 @@ public abstract class PayoutHandlerBase
             txHashes.Select(x => string.Format(coin.ExplorerTxLink, x)).ToArray() :
             Array.Empty<string>();
 
-        messageBus.SendMessage(new PaymentNotification(poolId, null, balances.Sum(x => x.Amount), coin.Symbol, balances.Length, txHashes, explorerLinks, txFee));
+        try
+        {
+            messageBus.SendMessage(new PaymentNotification(poolId, null, balances.Sum(x => x.Amount), coin.Symbol, balances.Length, txHashes, explorerLinks, txFee));
+        }
+        catch(Exception ex)
+        {
+            logger.Warn(ex, $"[{poolId}] Failed to push payment success notification");
+        }
     }
 
     protected virtual void NotifyPayoutFailure(string poolId, Balance[] balances, string error, Exception ex)
     {
         var coin = poolConfig.Template.As<CoinTemplate>();
 
-        messageBus.SendMessage(new PaymentNotification(poolId, error ?? ex?.Message, balances.Sum(x => x.Amount), coin.Symbol));
+        try
+        {
+            messageBus.SendMessage(new PaymentNotification(poolId, error ?? ex?.Message, balances.Sum(x => x.Amount), coin.Symbol));
+        }
+        catch(Exception notifyEx)
+        {
+            logger.Warn(notifyEx, $"[{poolId}] Failed to push payment failure notification");
+        }
     }
 }

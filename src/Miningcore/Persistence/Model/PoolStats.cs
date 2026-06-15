@@ -1,18 +1,18 @@
 namespace Miningcore.Persistence.Model;
 
-public record PoolStats
+public class PoolStats
 {
-    public long Id { get; init; }
-    public string PoolId { get; init; }
+    public long Id { get; set; }
+    public string PoolId { get; set; }
 
-    public int ConnectedMiners { get; init; }
-    public double PoolHashrate { get; init; }
-    public double NetworkHashrate { get; init; }
-    public double NetworkDifficulty { get; init; }
-    public DateTime? LastNetworkBlockTime { get; init; }
-    public long BlockHeight { get; init; }
-    public int ConnectedPeers { get; init; }
-    public double SharesPerSecond { get; init; }
+    public int ConnectedMiners { get; set; }
+    public double PoolHashrate { get; set; }
+    public double NetworkHashrate { get; set; }
+    public double NetworkDifficulty { get; set; }
+    public DateTime? LastNetworkBlockTime { get; set; }
+    public long BlockHeight { get; set; }
+    public int ConnectedPeers { get; set; }
+    public double SharesPerSecond { get; set; }
 
-    public DateTime Created { get; init; }
+    public DateTime Created { get; set; }
 }

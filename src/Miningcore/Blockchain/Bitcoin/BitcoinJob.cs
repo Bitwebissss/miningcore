@@ -1,7 +1,6 @@
 using System.Collections.Concurrent;
 using System.Globalization;
 using System.Text;
-using System.Security.Cryptography;
 using Miningcore.Blockchain.Bitcoin.Configuration;
 using Miningcore.Blockchain.Bitcoin.DaemonResponses;
 using Miningcore.Configuration;
@@ -12,7 +11,6 @@ using Miningcore.Time;
 using Miningcore.Util;
 using NBitcoin;
 using NBitcoin.DataEncoders;
-using Newtonsoft.Json.Linq;
 using Contract = Miningcore.Contracts.Contract;
 using Transaction = NBitcoin.Transaction;
 using System.Numerics;
@@ -29,7 +27,6 @@ public class BitcoinJob
     protected IHashAlgorithm headerHasher;
     protected bool isPoS;
     protected string txComment;
-    protected PayeeBlockTemplateExtra payeeParameters;
 
     protected Network network;
     protected IDestination poolAddressDestination;
@@ -43,8 +40,6 @@ public class BitcoinJob
     protected string coinbaseInitialHex;
     protected string[] merkleBranchesHex;
     protected MerkleTree mt;
-    protected string[] merkleSegwitBranchesHex;
-    protected MerkleTree mtSegwit;
 
     ///////////////////////////////////////////
     // GetJobParams related properties
@@ -57,13 +52,17 @@ public class BitcoinJob
     // serialization constants
     protected byte[] scriptSigFinalBytes;
 
-    protected static byte[] sha256Empty = new byte[32];
-    protected uint txVersion = 1u; // transaction version (currently 1) - see https://en.bitcoin.it/wiki/Transaction
+    // These are Bitcoin protocol constants serialized into the coinbase.
+    // Must NOT be static: BitcoinStream.ReadWrite(ref T) passes by reference, and in
+    // deserialize mode NBitcoin writes back through the ref — corrupting the shared value
+    // for every concurrent job instance. Each instance owns its own copy.
+    protected byte[] sha256Empty = new byte[32];
+    protected uint txVersion = 1u; // transaction version (currently 1)
 
-    protected static uint txInputCount = 1u;
-    protected static uint txInPrevOutIndex = (uint) (Math.Pow(2, 32) - 1);
-    protected static uint txInSequence;
-    protected static uint txLockTime;
+    protected uint txInputCount = 1u;
+    protected uint txInPrevOutIndex = (uint) (Math.Pow(2, 32) - 1);
+    protected uint txInSequence;
+    protected uint txLockTime;
 
     protected virtual void BuildMerkleBranches()
     {
@@ -78,59 +77,6 @@ public class BitcoinJob
         merkleBranchesHex = mt.Steps
             .Select(x => x.ToHexString())
             .ToArray();
-    }
-
-    private static byte[] Sha256Double(byte[] input)
-    {
-        using (var sha256 = SHA256.Create())
-        {
-            byte[] hash1 = sha256.ComputeHash(input);
-            byte[] hash2 = sha256.ComputeHash(hash1);
-            return hash2;
-        }
-    }
-
-    private MerkleTree BuildSegwitMerkleBranches()
-    {
-        var segwitTransactionHashes = BlockTemplate.Transactions
-            .Where(tx => IsSegWitTransaction(tx))
-            .Select(tx => (tx.TxId ?? tx.Hash)
-                .HexToByteArray()
-                .ReverseInPlace())
-            .ToArray();
-
-        // Build Merkle Tree with SegWit transactions
-        return new MerkleTree(segwitTransactionHashes);
-    }
-
-    private bool IsSegWitTransaction(BitcoinBlockTransaction tx)
-    {
-        // Convert hex string to byte array
-        byte[] txBytes = HexStringToByteArray(tx.Data);
-
-        // Convert byte array to hex string
-        string hexString = ByteArrayToHexString(txBytes);
-
-        // Parse the transaction using NBitcoin
-        var transaction = Transaction.Parse(hexString, Network.Main);
-
-        return transaction.HasWitness;
-    }
-
-    private byte[] HexStringToByteArray(string hex)
-    {
-        int length = hex.Length;
-        byte[] bytes = new byte[length / 2];
-        for (int i = 0; i < length; i += 2)
-        {
-            bytes[i / 2] = Convert.ToByte(hex.Substring(i, 2), 16);
-        }
-        return bytes;
-    }
-
-    private string ByteArrayToHexString(byte[] bytes)
-    {
-        return BitConverter.ToString(bytes).Replace("-", string.Empty);
     }
 
     protected virtual void BuildCoinbase()
@@ -210,12 +156,6 @@ public class BitcoinJob
             var data = Encoding.ASCII.GetBytes(txComment);
             bs.ReadWriteAsVarString(ref data);
         }
-
-        if(coin.HasMasterNodes && !string.IsNullOrEmpty(masterNodeParameters.CoinbasePayload))
-        {
-            var data = masterNodeParameters.CoinbasePayload.HexToByteArray();
-            bs.ReadWriteAsVarString(ref data);
-        }
     }
 
     protected virtual byte[] SerializeOutputTransaction(Transaction tx)
@@ -237,41 +177,12 @@ public class BitcoinJob
             byte[] raw;
             uint rawLength;
 
-            // serialize witness (segwit)
+            // serialize witness commitment (segwit)
             if(withDefaultWitnessCommitment)
             {
                 amount = 0;
                 raw = BlockTemplate.DefaultWitnessCommitment.HexToByteArray();
                 rawLength = (uint) raw.Length;
-
-                if (coin.Symbol == "RVH" || coin.Symbol == "ANOK")
-                {
-                    // Compute witness commitment
-                    raw = BlockTemplate.DefaultWitnessCommitment.HexToByteArray();
-                    byte[] witnessRoot = raw;
-                    byte[] witnessNonce = new byte[32];
-
-                    // Build Merkle Tree
-                    var mtSegwit = BuildSegwitMerkleBranches();
-                    var merkleRoot = mtSegwit.WithFirst(new byte[32]);
-
-                    // Concatenate witness root and nonce
-                    byte[] witnessRootAndNonce = new byte[witnessRoot.Length + witnessNonce.Length];
-                    Buffer.BlockCopy(witnessRoot, 0, witnessRootAndNonce, 0, witnessRoot.Length);
-                    Buffer.BlockCopy(witnessNonce, 0, witnessRootAndNonce, witnessRoot.Length, witnessNonce.Length);
-
-                    // Generate SHA256^2 hash
-                    byte[] hash = Sha256Double(witnessRootAndNonce);
-
-                    // Create scriptPubKey
-                    byte[] magic = new byte[] { 0xaa, 0x21, 0xa9, 0xed };
-                    byte[] scriptPubKey = new byte[36];
-                    Buffer.BlockCopy(magic, 0, scriptPubKey, 0, magic.Length);
-                    Buffer.BlockCopy(hash, 0, scriptPubKey, magic.Length, hash.Length);
-
-                    raw = scriptPubKey;
-                    rawLength = (uint)raw.Length;
-                }
 
                 bs.ReadWrite(ref amount);
                 bs.ReadWriteAsVarInt(ref rawLength);
@@ -323,68 +234,19 @@ public class BitcoinJob
         rewardToPool = new Money(BlockTemplate.CoinbaseValue, MoneyUnit.Satoshi);
         var tx = Transaction.Create(network);
 
-        if(coin.HasPayee)
-            rewardToPool = CreatePayeeOutput(tx, rewardToPool);
-
-        if(coin.HasMasterNodes)
-            rewardToPool = CreateMasternodeOutputs(tx, rewardToPool);
-
-        if(coin.HasFounderFee)
-            rewardToPool = CreateFounderOutputs(tx, rewardToPool);
-
-        if(coin.HasMinerDevFund)
-            rewardToPool = CreateMinerDevFundOutputs(tx, rewardToPool);
-
-        if(coin.HasMinerFund)
-            rewardToPool = CreateMinerFundOutputs(tx, rewardToPool);
-
-        if(coin.HasCommunityAddress)
-            rewardToPool = CreateCommunityAddressOutputs(tx, rewardToPool);
-
-        if(coin.HasCoinbaseDevReward)
-            rewardToPool = CreateCoinbaseDevRewardOutputs(tx, rewardToPool);
-
-        if(coin.HasFoundation)
-            rewardToPool = CreateFoundationOutputs(tx, rewardToPool);
-
-        if(coin.HasCommunity)
-            rewardToPool = CreateCommunityOutputs(tx, rewardToPool);
-
-        if(coin.HasDataMining)
-            rewardToPool = CreateDataMiningOutputs(tx, rewardToPool);
-
-        if(coin.HasDeveloper)
-            rewardToPool = CreateDeveloperOutputs(tx, rewardToPool);
-
-        if(coin.HasGovernanceAddress)
-            rewardToPool = CreateGovernanceAddressOutputs(tx, rewardToPool);
-
         // Remaining amount goes to pool
         tx.Outputs.Add(rewardToPool, poolAddressDestination);
 
         return tx;
     }
 
-    protected virtual Money CreatePayeeOutput(Transaction tx, Money reward)
-    {
-        if(payeeParameters?.PayeeAmount != null && payeeParameters.PayeeAmount.Value > 0)
-        {
-            var payeeReward = new Money(payeeParameters.PayeeAmount.Value, MoneyUnit.Satoshi);
-            reward -= payeeReward;
-
-            tx.Outputs.Add(payeeReward, BitcoinUtils.AddressToDestination(payeeParameters.Payee, network));
-        }
-
-        return reward;
-    }
-
     protected bool RegisterSubmit(string extraNonce1, string extraNonce2, string nTime, string nonce)
     {
         var key = new StringBuilder()
             .Append(extraNonce1)
-            .Append(extraNonce2) // lowercase as we don't want to accept case-sensitive values as valid.
+            .Append(extraNonce2)
             .Append(nTime)
-            .Append(nonce) // lowercase as we don't want to accept case-sensitive values as valid.
+            .Append(nonce)
             .ToString();
 
         return submissions.TryAdd(key, true);
@@ -435,8 +297,8 @@ public class BitcoinJob
         var headerValue = new uint256(headerHash);
 
         // calc share-diff
-	var diff1 = coin.Diff1 != null ? BigInteger.Parse(coin.Diff1, NumberStyles.HexNumber) : BitcoinConstants.Diff1; // ?????Bitcoin??
-	var shareDiff = (double) new BigRational(diff1, headerHash.ToBigInteger()) * shareMultiplier;
+        var diff1 = coin.Diff1 != null ? BigInteger.Parse(coin.Diff1, NumberStyles.HexNumber) : BitcoinConstants.Diff1;
+        var shareDiff = (double) new BigRational(diff1, headerHash.ToBigInteger()) * shareMultiplier;
         var stratumDifficulty = context.Difficulty;
         var ratio = shareDiff / stratumDifficulty;
 
@@ -521,19 +383,6 @@ public class BitcoinJob
             if(isPoS)
                 bs.ReadWrite((byte) 0);
 
-            // if pool supports MWEB, we have to append the MWEB data to the block
-            // https://github.com/litecoin-project/litecoin/blob/0.21/doc/mweb/mining-changes.md
-            if(coin.HasMWEB)
-            {
-                var separator = new byte[] { 0x01 };
-                var mweb = BlockTemplate.Extra.SafeExtensionDataAs<MwebBlockTemplateExtra>();
-                if (mweb != null && mweb.Mweb != null) {
-                    var mwebRaw = mweb.Mweb.HexToByteArray();
-                    bs.ReadWrite(separator);
-                    bs.ReadWrite(mwebRaw);
-                }
-            }
-
             return stream.ToArray();
         }
     }
@@ -551,330 +400,6 @@ public class BitcoinJob
             return stream.ToArray();
         }
     }
-
-    #region Masternodes
-
-    protected MasterNodeBlockTemplateExtra masterNodeParameters;
-
-    protected virtual Money CreateMasternodeOutputs(Transaction tx, Money reward)
-    {
-        if(masterNodeParameters.Masternode != null)
-        {
-            Masternode[] masternodes;
-
-            // Dash v13 Multi-Master-Nodes
-            if(masterNodeParameters.Masternode.Type == JTokenType.Array)
-                masternodes = masterNodeParameters.Masternode.ToObject<Masternode[]>();
-            else
-                masternodes = new[] { masterNodeParameters.Masternode.ToObject<Masternode>() };
-
-            if(masternodes != null)
-            {
-                foreach(var masterNode in masternodes)
-                {
-                    if(!string.IsNullOrEmpty(masterNode.Script))
-                    {
-                        Script payeeAddress = new (masterNode.Script.HexToByteArray());
-                        var payeeReward = masterNode.Amount;
-
-                        tx.Outputs.Add(payeeReward, payeeAddress);
-                        reward -= payeeReward;
-                    }
-                }
-            }
-        }
-
-        if(masterNodeParameters.SuperBlocks is { Length: > 0 })
-        {
-            foreach(var superBlock in masterNodeParameters.SuperBlocks)
-            {
-                var payeeAddress = BitcoinUtils.AddressToDestination(superBlock.Payee, network);
-                var payeeReward = superBlock.Amount;
-
-                tx.Outputs.Add(payeeReward, payeeAddress);
-                reward -= payeeReward;
-            }
-        }
-
-        if(!coin.HasPayee && !string.IsNullOrEmpty(masterNodeParameters.Payee))
-        {
-            var payeeAddress = BitcoinUtils.AddressToDestination(masterNodeParameters.Payee, network);
-            var payeeReward = masterNodeParameters.PayeeAmount;
-
-            tx.Outputs.Add(payeeReward, payeeAddress);
-            reward -= payeeReward;
-        }
-
-        return reward;
-    }
-
-    #endregion // Masternodes
-
-    #region Community
-
-    protected CommunityBlockTemplateExtra communityParameters;
-
-    protected virtual Money CreateCommunityOutputs(Transaction tx, Money reward)
-    {
-        if (communityParameters.Community != null)
-        {
-            Community[] communitys;
-            if (communityParameters.Community.Type == JTokenType.Array)
-                communitys = communityParameters.Community.ToObject<Community[]>();
-            else
-                communitys = new[] { communityParameters.Community.ToObject<Community>() };
-
-            if(communitys != null)
-            {
-                foreach(var Community in communitys)
-                {
-                    if(!string.IsNullOrEmpty(Community.Script))
-                    {
-                        Script payeeAddress = new (Community.Script.HexToByteArray());
-                        var payeeReward = Community.Amount;
-
-                        tx.Outputs.Add(payeeReward, payeeAddress);
-                        reward -= payeeReward;
-                    }
-                }
-            }
-        }
-
-        return reward;
-    }
-
-    #endregion //Community
-
-    #region DataMining
-
-    protected DataMiningBlockTemplateExtra dataminingParameters;
-
-    protected virtual Money CreateDataMiningOutputs(Transaction tx, Money reward)
-    {
-        if (dataminingParameters.DataMining != null)
-        {
-            DataMining[] dataminings;
-            if (dataminingParameters.DataMining.Type == JTokenType.Array)
-                dataminings = dataminingParameters.DataMining.ToObject<DataMining[]>();
-            else
-                dataminings = new[] { dataminingParameters.DataMining.ToObject<DataMining>() };
-
-            if(dataminings != null)
-            {
-                foreach(var DataMining in dataminings)
-                {
-                    if(!string.IsNullOrEmpty(DataMining.Script))
-                    {
-                        Script payeeAddress = new (DataMining.Script.HexToByteArray());
-                        var payeeReward = DataMining.Amount;
-
-                        tx.Outputs.Add(payeeReward, payeeAddress);
-                        //reward -= payeeReward;
-                    }
-                }
-            }
-        }
-
-        return reward;
-    }
-
-    #endregion //DataMining
-
-    #region Developer
-
-    protected DeveloperBlockTemplateExtra developerParameters;
-
-    protected virtual Money CreateDeveloperOutputs(Transaction tx, Money reward)
-    {
-        if (developerParameters.Developer != null)
-        {
-            Developer[] developers;
-            if (developerParameters.Developer.Type == JTokenType.Array)
-                developers = developerParameters.Developer.ToObject<Developer[]>();
-            else
-                developers = new[] { developerParameters.Developer.ToObject<Developer>() };
-
-            if(developers != null)
-            {
-                foreach(var Developer in developers)
-                {
-                    if(!string.IsNullOrEmpty(Developer.Script))
-                    {
-                        Script payeeAddress = new (Developer.Script.HexToByteArray());
-                        var payeeReward = Developer.Amount;
-
-                        tx.Outputs.Add(payeeReward, payeeAddress);
-                        reward -= payeeReward;
-                    }
-                }
-            }
-        }
-
-        return reward;
-    }
-
-    #endregion //Developer
-
-    #region Founder
-
-    protected FounderBlockTemplateExtra founderParameters;
-
-    protected virtual Money CreateFounderOutputs(Transaction tx, Money reward)
-    {
-        if (founderParameters.Founder != null)
-        {
-            Founder[] founders;
-            if (founderParameters.Founder.Type == JTokenType.Array)
-                founders = founderParameters.Founder.ToObject<Founder[]>();
-            else
-                founders = new[] { founderParameters.Founder.ToObject<Founder>() };
-
-            if(founders != null)
-            {
-                foreach(var Founder in founders)
-                {
-                    if(!string.IsNullOrEmpty(Founder.Script))
-                    {
-                        Script payeeAddress = new (Founder.Script.HexToByteArray());
-                        var payeeReward = Founder.Amount;
-
-                        tx.Outputs.Add(payeeReward, payeeAddress);
-                        reward -= payeeReward;
-                    }
-                }
-            }
-        }
-
-        return reward;
-    }
-
-    #endregion // Founder
-
-    #region Minerfund
-
-    protected MinerFundTemplateExtra minerFundParameters;
-
-    protected virtual Money CreateMinerFundOutputs(Transaction tx, Money reward)
-    {
-        if (!string.IsNullOrEmpty(minerFundParameters.Addresses?.FirstOrDefault()))
-        {
-            var payeeAddress = BitcoinUtils.AddressToDestination(minerFundParameters.Addresses[0], network);
-            var payeeReward = minerFundParameters.MinimumValue;
-            tx.Outputs.Add(payeeReward, payeeAddress);
-            reward -= payeeReward;
-        }
-        return reward;
-    }
-
-    #endregion // Minerfund
-
-
-    #region MinerDevfund
-
-    protected MinerDevFundTemplateExtra minerDevFundParameters;
-
-    protected virtual Money CreateMinerDevFundOutputs(Transaction tx, Money reward)
-    {
-        if (!string.IsNullOrEmpty(minerDevFundParameters.Addresses?.FirstOrDefault()))
-        {
-            var payeeAddress = BitcoinUtils.AddressToDestination(minerDevFundParameters.Addresses[0], network);
-            var payeeReward = minerDevFundParameters.MinimumValue;
-            tx.Outputs.Add(payeeReward, payeeAddress);
-            reward -= payeeReward;
-        }
-        return reward;
-    }
-
-    #endregion // MinerDevfund
-
-    #region CommunityAddress
-
-    protected virtual Money CreateCommunityAddressOutputs(Transaction tx, Money reward)
-    {
-        if(BlockTemplate.CommunityAutonomousValue > 0)
-        {
-            var payeeReward = BlockTemplate.CommunityAutonomousValue;
-            var payeeAddress = BitcoinUtils.AddressToDestination(BlockTemplate.CommunityAutonomousAddress, network);
-            tx.Outputs.Add(payeeReward, payeeAddress);
-        }
-        return reward;
-    }
-    #endregion // CommunityAddres
-
-    #region CoinbaseDevReward
-
-    protected CoinbaseDevRewardTemplateExtra CoinbaseDevRewardParams;
-
-    protected virtual Money CreateCoinbaseDevRewardOutputs(Transaction tx, Money reward)
-    {
-        if(CoinbaseDevRewardParams.CoinbaseDevReward != null)
-        {
-            CoinbaseDevReward[] CBRewards;
-            CBRewards = new[] { CoinbaseDevRewardParams.CoinbaseDevReward.ToObject<CoinbaseDevReward>() };
-
-            foreach(var CBReward in CBRewards)
-            {
-                if(!string.IsNullOrEmpty(CBReward.ScriptPubkey))
-                {
-                    Script payeeAddress = new (CBReward.ScriptPubkey.HexToByteArray());
-                    var payeeReward = CBReward.Value;
-                    tx.Outputs.Add(payeeReward, payeeAddress);
-                }
-            }
-        }
-        return reward;
-    }
-
-    #endregion // CoinbaseDevReward
-
-    #region GovernanceAddress
-
-    protected virtual Money CreateGovernanceAddressOutputs(Transaction tx, Money reward)
-    {
-        if(BlockTemplate.GovernanceReward > 0)
-        {
-            var payeeReward = BlockTemplate.GovernanceReward;
-            var payeeAddress = BitcoinUtils.BechSegwitAddressToDestination(BlockTemplate.GovernanceAddress, network, coin?.BechPrefix);
-            tx.Outputs.Add(payeeReward, payeeAddress);
-            reward -= payeeReward;
-        }
-        return reward;
-    }
-    #endregion // GovernanceAddress
-
-    #region Foundation
-
-    protected FoundationBlockTemplateExtra foundationParameters;
-
-    protected virtual Money CreateFoundationOutputs(Transaction tx, Money reward)
-    {
-        if(foundationParameters.Foundation != null)
-        {
-            Foundation[] foundations;
-            if(foundationParameters.Foundation.Type == JTokenType.Array)
-                foundations = foundationParameters.Foundation.ToObject<Foundation[]>();
-            else
-                foundations = new[] { foundationParameters.Foundation.ToObject<Foundation>() };
-
-            if(foundations != null)
-            {
-                foreach(var Foundation in foundations)
-                {
-                    if(!string.IsNullOrEmpty(Foundation.Payee))
-                    {
-                        var payeeAddress = BitcoinUtils.AddressToDestination(Foundation.Payee, network);
-                        var payeeReward = Foundation.Amount;
-
-                        tx.Outputs.Add(payeeReward, payeeAddress);
-                        reward -= payeeReward;
-                    }
-                }
-            }
-        }
-        return reward;
-    }
-
-    #endregion // Foundation
 
     #region API-Surface
 
@@ -909,8 +434,10 @@ public class BitcoinJob
         BlockTemplate = blockTemplate;
         JobId = jobId;
 
+        // cc.PaymentProcessing and CoinbaseString are guaranteed non-null by the
+        // IsNullOrEmpty guard above; remove the redundant null-conditional (?.)
         var coinbaseString = !string.IsNullOrEmpty(cc.PaymentProcessing?.CoinbaseString) ?
-            cc.PaymentProcessing?.CoinbaseString.Trim() : "Miningcore";
+            cc.PaymentProcessing.CoinbaseString.Trim() : "Miningcore";
 
         scriptSigFinalBytes = new Script(Op.GetPushOp(Encoding.UTF8.GetBytes(coinbaseString))).ToBytes();
 
@@ -922,79 +449,6 @@ public class BitcoinJob
 
         txComment = !string.IsNullOrEmpty(extraPoolConfig?.CoinbaseTxComment) ?
             extraPoolConfig.CoinbaseTxComment : coin.CoinbaseTxComment;
-
-        if(coin.HasMasterNodes)
-        {
-            masterNodeParameters = BlockTemplate.Extra.SafeExtensionDataAs<MasterNodeBlockTemplateExtra>();
-
-            if(coin.HasSmartNodes)
-            {
-                if(masterNodeParameters.Extra?.ContainsKey("smartnode") == true)
-                {
-                    masterNodeParameters.Masternode = JToken.FromObject(masterNodeParameters.Extra["smartnode"]);
-                }
-            }
-
-            if(!string.IsNullOrEmpty(masterNodeParameters.CoinbasePayload))
-            {
-                txVersion = 3;
-                const uint txType = 5;
-                txVersion += txType << 16;
-            }
-        }
-
-        if(coin.HasPayee)
-            payeeParameters = BlockTemplate.Extra.SafeExtensionDataAs<PayeeBlockTemplateExtra>();
-
-        if(coin.HasCommunity)
-            communityParameters = BlockTemplate.Extra.SafeExtensionDataAs<CommunityBlockTemplateExtra>();
-
-        if(coin.HasDataMining)
-            dataminingParameters = BlockTemplate.Extra.SafeExtensionDataAs<DataMiningBlockTemplateExtra>();
-
-        if(coin.HasDeveloper)
-            developerParameters = BlockTemplate.Extra.SafeExtensionDataAs<DeveloperBlockTemplateExtra>();
-
-        if (coin.HasFounderFee)
-        {
-            founderParameters = BlockTemplate.Extra.SafeExtensionDataAs<FounderBlockTemplateExtra>();
-
-            if(coin.Symbol == "FTB")
-            {
-                if(founderParameters.Extra?.ContainsKey("fortune") == true)
-                {
-                    founderParameters.Founder = JToken.FromObject(founderParameters.Extra["fortune"]);
-                }
-            }
-
-            if(coin.Symbol == "ADOT")
-            {
-                if(founderParameters.Extra?.ContainsKey("fundreward") == true)
-                {
-                    founderParameters.Founder = JToken.FromObject(founderParameters.Extra["fundreward"]);
-                }
-            }
-
-            if(coin.HasDevFee)
-            {
-                if(founderParameters.Extra?.ContainsKey("devfee") == true)
-                {
-                    founderParameters.Founder = JToken.FromObject(founderParameters.Extra["devfee"]);
-                }
-            }
-        }
-
-        if (coin.HasMinerDevFund)
-            minerDevFundParameters = BlockTemplate.Extra.SafeExtensionDataAs<MinerDevFundTemplateExtra>("coinbasetxn", "minerdevfund");
-
-        if (coin.HasMinerFund)
-            minerFundParameters = BlockTemplate.Extra.SafeExtensionDataAs<MinerFundTemplateExtra>("coinbasetxn", "minerfund");
-
-        if (coin.HasCoinbaseDevReward)
-            CoinbaseDevRewardParams = BlockTemplate.Extra.SafeExtensionDataAs<CoinbaseDevRewardTemplateExtra>();
-
-        if (coin.HasFoundation)
-            foundationParameters = BlockTemplate.Extra.SafeExtensionDataAs<FoundationBlockTemplateExtra>();
 
         this.coinbaseHasher = coinbaseHasher;
         this.headerHasher = headerHasher;
@@ -1032,8 +486,13 @@ public class BitcoinJob
 
     public object GetJobParams(bool isNew)
     {
-        jobParams[^1] = isNew;
-        return jobParams;
+        // Clone so every caller (broadcast loop + vardiff update) gets its own
+        // array and can safely set [^1] without racing against other concurrent
+        // calls on the same job instance. jobParams elements are all immutable
+        // strings/arrays, so a shallow clone is sufficient.
+        var result = (object[]) jobParams.Clone();
+        result[^1] = isNew;
+        return result;
     }
 
     public virtual (Share Share, string BlockHex) ProcessShare(StratumConnection worker,

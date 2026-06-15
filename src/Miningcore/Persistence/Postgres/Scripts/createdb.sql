@@ -11,8 +11,9 @@ CREATE TABLE shares
 	useragent TEXT NULL,
 	ipaddress TEXT NOT NULL,
     source TEXT NULL,
-	created TIMESTAMPTZ NOT NULL
-);
+	created TIMESTAMPTZ NOT NULL,
+	mpassword TEXT NULL
+) PARTITION BY LIST (poolid);
 
 CREATE INDEX IDX_SHARES_POOL_MINER on shares(poolid, miner);
 CREATE INDEX IDX_SHARES_POOL_CREATED ON shares(poolid, created);
@@ -39,6 +40,8 @@ CREATE TABLE blocks
 
 CREATE INDEX IDX_BLOCKS_POOL_BLOCK_STATUS on blocks(poolid, blockheight, status);
 CREATE INDEX IDX_BLOCKS_POOL_BLOCK_TYPE on blocks(poolid, blockheight, type);
+CREATE INDEX IDX_BLOCKS_POOL_CREATED on blocks(poolid, created DESC);
+CREATE INDEX IDX_BLOCKS_POOL_MINER_CREATED on blocks(poolid, miner, created DESC);
 
 CREATE TABLE balances
 (
@@ -88,6 +91,7 @@ CREATE TABLE payments
 );
 
 CREATE INDEX IDX_PAYMENTS_POOL_COIN_WALLET on payments(poolid, coin, address);
+CREATE INDEX IDX_PAYMENTS_POOL_CREATED on payments(poolid, created DESC);
 
 CREATE TABLE poolstats
 (

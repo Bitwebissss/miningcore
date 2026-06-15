@@ -88,24 +88,6 @@ public class BlockTemplate
     [JsonProperty("default_witness_commitment")]
     public string DefaultWitnessCommitment { get; set; }
 
-    /// <summary>
-    /// CommunityAutonomous
-    /// </summary>
-    [JsonProperty(DefaultValueHandling = DefaultValueHandling.Ignore)]
-    public string CommunityAutonomousAddress { get; set; }
-
-    [JsonProperty(DefaultValueHandling = DefaultValueHandling.Ignore)]
-    public long CommunityAutonomousValue { get; set; }
-
-    /// <summary>
-    /// GovernanceAddress
-    /// </summary>
-    [JsonProperty(DefaultValueHandling = DefaultValueHandling.Ignore)]
-    public string GovernanceAddress { get; set; }
-
-    [JsonProperty(DefaultValueHandling = DefaultValueHandling.Ignore)]
-    public long GovernanceReward { get; set; }
-
     [JsonExtensionData]
     public IDictionary<string, object> Extra { get; set; }
 }

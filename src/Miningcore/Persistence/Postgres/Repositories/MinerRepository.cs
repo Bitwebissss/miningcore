@@ -1,5 +1,5 @@
 using System.Data;
-using AutoMapper;
+using MapsterMapper;
 using Dapper;
 using Miningcore.Persistence.Model;
 using Miningcore.Persistence.Repositories;

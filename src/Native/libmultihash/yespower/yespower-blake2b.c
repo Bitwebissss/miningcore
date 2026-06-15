@@ -40,6 +40,10 @@
 
 #ifndef _YESPOWER_OPT_C_PASS_
 #define _YESPOWER_OPT_C_PASS_ 1
+
+#ifdef _MSC_VER
+#  define __thread __declspec(thread)
+#endif
 #endif
 
 #if _YESPOWER_OPT_C_PASS_ == 1
@@ -50,15 +54,15 @@
  * XOP, some slowdown is sometimes observed on Intel CPUs with AVX.
  */
 #ifdef __XOP__
-#warning "Note: XOP is enabled.  That's great."
+#pragma message "Note: XOP is enabled.  That's great."
 #elif defined(__AVX__)
-#warning "Note: AVX is enabled.  That's OK."
+#pragma message "Note: AVX is enabled.  That's OK."
 #elif defined(__SSE2__)
-#warning "Note: AVX and XOP are not enabled.  That's OK."
+#pragma message "Note: AVX and XOP are not enabled.  That's OK."
 #elif defined(__x86_64__) || defined(__i386__)
-#warning "SSE2 not enabled.  Expect poor performance."
+#pragma message("SSE2 not enabled.  Expect poor performance.")
 #else
-#warning "Note: building generic code for non-x86.  That's OK."
+#pragma message("Note: building generic code for non-x86.  That's OK.")
 #endif
 
 /*
@@ -236,8 +240,8 @@ static inline void salsa20_simd_unshuffle(const salsa20_blk_t *Bin,
     salsa20_blk_t *Bout)
 {
 #define UNCOMBINE(out, in1, in2) \
-    Bout->w[out * 2] = Bin->d[in1]; \
-    Bout->w[out * 2 + 1] = Bin->d[in2] >> 32;
+    Bout->w[out * 2] = (uint32_t)Bin->d[in1]; \
+    Bout->w[out * 2 + 1] = (uint32_t)(Bin->d[in2] >> 32);
     UNCOMBINE(0, 0, 6)
     UNCOMBINE(1, 5, 3)
     UNCOMBINE(2, 2, 0)
@@ -613,7 +617,7 @@ static volatile uint64_t Smask2var = Smask2;
 /* 64-bit without AVX.  This relies on out-of-order execution and register
  * renaming.  It may actually be fastest on CPUs with AVX(2) as well - e.g.,
  * it runs great on Haswell. */
-#warning "Note: using x86-64 inline assembly for pwxform.  That's great."
+#pragma message "Note: using x86-64 inline assembly for pwxform.  That's great."
 #undef MAYBE_MEMORY_BARRIER
 #define MAYBE_MEMORY_BARRIER \
     __asm__("" : : : "memory");

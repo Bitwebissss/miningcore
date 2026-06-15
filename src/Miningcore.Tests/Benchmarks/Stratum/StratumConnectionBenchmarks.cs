@@ -1,5 +1,8 @@
+// Benchmarks are excluded from the normal test run (Skip below).
+// To run: remove Skip, execute `dotnet test -c Release`, then restore it.
+// BenchmarkDotNet requires a Release build to produce meaningful numbers.
+using System;
 using System.Buffers;
-using System.Diagnostics;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -15,18 +18,24 @@ using NLog;
 
 namespace Miningcore.Tests.Benchmarks.Stratum;
 
+/// <summary>
+/// Microbenchmarks for <see cref="StratumConnection.ProcessRequestAsync"/>.
+/// Measures JSON deserialisation + handler dispatch overhead for a single
+/// stratum request (mining.authorize) on the hot path.
+/// </summary>
 [MemoryDiagnoser]
 public class StratumConnectionBenchmarks : TestBase
 {
-    private const string JsonRpcVersion = "2.0";
-    private const string ConnectionId = "foo";
-    private const string requestString = "{\"params\": [\"slush.miner1\", \"password\"], \"id\": 42, \"method\": \"mining.authorize\"}\\n";
+    private const string ConnectionId = "bench-conn";
+
+    // A well-formed stratum mining.authorize request.
+    private static readonly byte[] requestBytes =
+        Encoding.UTF8.GetBytes("{\"params\": [\"slush.miner1\", \"password\"], \"id\": 42, \"method\": \"mining.authorize\"}\n");
+
     private const string ProcessRequestAsyncMethod = "ProcessRequestAsync";
 
     private RecyclableMemoryStreamManager rmsm;
-    private IMasterClock clock;
     private ILogger logger;
-
     private StratumConnection connection;
     private PrivateObject wrapper;
 
@@ -35,25 +44,27 @@ public class StratumConnectionBenchmarks : TestBase
     {
         ModuleInitializer.Initialize();
 
-        rmsm = ModuleInitializer.Container.Resolve<RecyclableMemoryStreamManager>();
-        clock = ModuleInitializer.Container.Resolve<IMasterClock>();
+        rmsm   = ModuleInitializer.Container.Resolve<RecyclableMemoryStreamManager>();
         logger = new NullLogger(LogManager.LogFactory);
 
-        connection = new(logger, rmsm, clock, ConnectionId, false);
-        wrapper = new(connection);
+        connection = new StratumConnection(logger, rmsm,
+            ModuleInitializer.Container.Resolve<IMasterClock>(), ConnectionId, false);
+        wrapper    = new PrivateObject(connection);
     }
 
-    Task OnPlaceholderRequestAsync(StratumConnection con, JsonRpcRequest request, CancellationToken ct)
-    {
-        return Task.CompletedTask;
-    }
+    private static Task OnPlaceholderRequestAsync(StratumConnection con, JsonRpcRequest request, CancellationToken ct)
+        => Task.CompletedTask;
 
+    /// <summary>
+    /// Benchmarks the full JSON parse + handler dispatch cycle for one
+    /// valid stratum request. Allocations shown by [MemoryDiagnoser].
+    /// </summary>
     [Benchmark]
     public async Task ProcessRequest_Handle_Valid_Request()
     {
         await (Task) wrapper.Invoke(ProcessRequestAsyncMethod,
             CancellationToken.None,
-            OnPlaceholderRequestAsync,
-            new ReadOnlySequence<byte>(Encoding.UTF8.GetBytes(requestString)));
+            (Func<StratumConnection, JsonRpcRequest, CancellationToken, Task>) OnPlaceholderRequestAsync,
+            new ReadOnlySequence<byte>(requestBytes));
     }
 }

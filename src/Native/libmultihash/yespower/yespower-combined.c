@@ -21,7 +21,7 @@
 #endif
 
 /*
- * Encode a length len*2 vector of (uint32_t) into a length len*8 vector of
+ * Encode a length *len2 vector of (uint32_t) into a length *len8 vector of
  * (uint8_t) in big-endian form.
  */
 static void
@@ -38,8 +38,8 @@ be32enc_vect(uint8_t * dst, const uint32_t * src, size_t len)
 }
 
 /*
- * Decode a big-endian length len*8 vector of (uint8_t) into a length
- * len*2 vector of (uint32_t).
+ * Decode a big-endian length *len8 vector of (uint8_t) into a length
+ * *len2 vector of (uint32_t).
  */
 static void
 be32dec_vect(uint32_t * dst, const uint8_t * src, size_t len)
@@ -107,9 +107,9 @@ static const uint32_t Krnd[64] = {
  * the 512-bit input block to produce a new state.
  */
 static void
-SHA256_Transform(uint32_t state[static restrict 8],
-    const uint8_t block[static restrict 64],
-    uint32_t W[static restrict 64], uint32_t S[static restrict 8])
+SHA256_Transform(uint32_t *state,
+    const uint8_t *block,
+    uint32_t *W, uint32_t *S)
 {
 	int i;
 
@@ -178,7 +178,7 @@ static const uint8_t PAD[64] = {
 
 /* Add padding and terminating bit-count. */
 static void
-SHA256_Pad(SHA256_CTX * ctx, uint32_t tmp32[static restrict 72])
+SHA256_Pad(SHA256_CTX * ctx, uint32_t *tmp32)
 {
 	size_t r;
 
@@ -232,7 +232,7 @@ SHA256_Init(SHA256_CTX * ctx)
  */
 static void
 _SHA256_Update(SHA256_CTX * ctx, const void * in, size_t len,
-    uint32_t tmp32[static restrict 72])
+    uint32_t *tmp32)
 {
 	uint32_t r;
 	const uint8_t * src = in;
@@ -290,7 +290,7 @@ SHA256_Update(SHA256_CTX * ctx, const void * in, size_t len)
  */
 static void
 _SHA256_Final(uint8_t digest[32], SHA256_CTX * ctx,
-    uint32_t tmp32[static restrict 72])
+    uint32_t *tmp32)
 {
 
 	/* Add padding. */
@@ -342,8 +342,8 @@ SHA256_Buf(const void * in, size_t len, uint8_t digest[32])
  */
 static void
 _HMAC_SHA256_Init(HMAC_SHA256_CTX * ctx, const void * _K, size_t Klen,
-    uint32_t tmp32[static restrict 72], uint8_t pad[static restrict 64],
-    uint8_t khash[static restrict 32])
+    uint32_t *tmp32, uint8_t *pad,
+    uint8_t *khash)
 {
 	const uint8_t * K = _K;
 	size_t i;
@@ -395,7 +395,7 @@ HMAC_SHA256_Init(HMAC_SHA256_CTX * ctx, const void * _K, size_t Klen)
  */
 static void
 _HMAC_SHA256_Update(HMAC_SHA256_CTX * ctx, const void * in, size_t len,
-    uint32_t tmp32[static restrict 72])
+    uint32_t *tmp32)
 {
 
 	/* Feed data to the inner SHA256 operation. */
@@ -422,7 +422,7 @@ HMAC_SHA256_Update(HMAC_SHA256_CTX * ctx, const void * in, size_t len)
  */
 static void
 _HMAC_SHA256_Final(uint8_t digest[32], HMAC_SHA256_CTX * ctx,
-    uint32_t tmp32[static restrict 72], uint8_t ihash[static restrict 32])
+    uint32_t *tmp32, uint8_t *ihash)
 {
 
 	/* Finish the inner SHA256 operation. */
@@ -475,8 +475,8 @@ HMAC_SHA256_Buf(const void * K, size_t Klen, const void * in, size_t len,
 
 /* Add padding and terminating bit-count, but don't invoke Transform yet. */
 static int
-SHA256_Pad_Almost(SHA256_CTX * ctx, uint8_t len[static restrict 8],
-    uint32_t tmp32[static restrict 72])
+SHA256_Pad_Almost(SHA256_CTX * ctx, uint8_t *len,
+    uint32_t *tmp32)
 {
 	uint32_t r;
 
@@ -778,8 +778,8 @@ static void pwxform(uint32_t *B, pwxform_ctx_t *ctx)
 				x += s0;
 				x ^= s1;
 
-				X[j][k][0] = x;
-				X[j][k][1] = x >> 32;
+				X[j][k][0] = (uint32_t)x;
+				X[j][k][1] = (uint32_t)(x >> 32);
 			}
 
 			if (ctx->version != YESPOWER_0_5 &&
@@ -1155,30 +1155,6 @@ void yespower_hash(const char* input, char* output, uint32_t len)
     yespower_tls(input, 80, &yespower_1_0, (yespower_binary_t *)output);
 }
 
-void yespowerIC_hash(const char* input, char* output, uint32_t len)
-{
-    yespower_params_t yespower_1_0_isotopec = {
-        .version = YESPOWER_1_0,
-        .N = 2048,
-        .r = 32,
-        .pers = (const uint8_t *)"IsotopeC",
-        .perslen = 8
-    };
-    yespower_tls(input, 80, &yespower_1_0_isotopec, (yespower_binary_t *)output);
-}
-
-void yespowerIOTS_hash(const char* input, char* output, uint32_t len)
-{
-    yespower_params_t yespower_1_0_iots = {
-        .version = YESPOWER_1_0,
-        .N = 2048,
-        .r = 32,
-        .pers = (const uint8_t *)"Iots is committed to the development of IOT",
-        .perslen = 43
-    };
-    yespower_tls(input, 80, &yespower_1_0_iots, (yespower_binary_t *)output);
-}
-
 void yespowerR16_hash(const char* input, char* output, uint32_t len)
 {
     yespower_params_t yespower_1_0_r16 = {
@@ -1191,161 +1167,39 @@ void yespowerR16_hash(const char* input, char* output, uint32_t len)
     yespower_tls(input, 80, &yespower_1_0_r16, (yespower_binary_t *)output);
 }
 
-void yespowerRES_hash(const char* input, char* output, uint32_t len)
+/* yescrypt compatibility exports - algorithmically identical to yespower 0.5 */
+void yescryptR8_hash(const char *input, char *output, uint32_t len)
 {
-    yespower_params_t yespower_1_0_resistance = {
-        .version = YESPOWER_1_0,
+    yespower_params_t params = {
+        .version = YESPOWER_0_5,
+        .N = 2048,
+        .r = 8,
+        .pers = NULL,
+        .perslen = 0
+    };
+    yespower_tls((const uint8_t *)input, len, &params, (yespower_binary_t *)output);
+}
+
+void yescryptR16_hash(const char *input, char *output, uint32_t len)
+{
+    yespower_params_t params = {
+        .version = YESPOWER_0_5,
+        .N = 4096,
+        .r = 16,
+        .pers = NULL,
+        .perslen = 0
+    };
+    yespower_tls((const uint8_t *)input, len, &params, (yespower_binary_t *)output);
+}
+
+void yescryptR32_hash(const char *input, char *output, uint32_t len)
+{
+    yespower_params_t params = {
+        .version = YESPOWER_0_5,
         .N = 4096,
         .r = 32,
         .pers = NULL,
         .perslen = 0
     };
-    yespower_tls(input, 140, &yespower_1_0_resistance, (yespower_binary_t *)output);
+    yespower_tls((const uint8_t *)input, len, &params, (yespower_binary_t *)output);
 }
-
-void yespowerSUGAR_hash(const char* input, char* output, uint32_t len)
-{
-    yespower_params_t yespower_1_0_sugarchain = {
-        .version = YESPOWER_1_0,
-        .N = 2048,
-        .r = 32,
-        .pers = (const uint8_t *)"Satoshi Nakamoto 31/Oct/2008 Proof-of-work is essentially one-CPU-one-vote",
-        .perslen = 74
-    };
-    yespower_tls(input, 80, &yespower_1_0_sugarchain, (yespower_binary_t *)output);
-}
-
-void yespowerURX_hash(const char* input, char* output, uint32_t len)
-{
-    yespower_params_t yespower_1_0_uraniumx = {
-        .version = YESPOWER_1_0,
-        .N = 2048,
-        .r = 32,
-        .pers = (const uint8_t *)"UraniumX",
-        .perslen = 8
-    };
-    yespower_tls( input, len, &yespower_1_0_uraniumx, (yespower_binary_t *)output);
-}
-
-void yespowerLTNCG_hash(const char* input, char* output, uint32_t len)
-{
-    yespower_params_t yespower_1_0_ltncg = {
-        .version = YESPOWER_1_0,
-        .N = 2048,
-        .r = 32,
-        .pers = (const uint8_t *)"LTNCGYES",
-        .perslen = 8
-    };
-    yespower_tls( input, len, &yespower_1_0_ltncg, (yespower_binary_t *)output);
-}
-
-void yespowerLITB_hash(const char* input, char* output, uint32_t len)
-{
-    yespower_params_t yespower_1_0_litb = {
-        .version = YESPOWER_1_0,
-	.N = 2048,
-	.r = 32,
-	.pers = "LITBpower: The number of LITB working or available for proof-of-work mining",
-	.perslen = 73
-    };
-    yespower_tls( input, len, &yespower_1_0_litb, (yespower_binary_t *)output);
-}
-
-void yespowerTIDE_hash(const char* input, char* output, uint32_t len)
-{
-    yespower_params_t yespower_1_0_tide = {
-        .version = YESPOWER_1_0,
-        .N = 2048,
-        .r = 8,
-        .pers = NULL,
-        .perslen = 0
-    };
-    yespower_tls( input, len, &yespower_1_0_tide, (yespower_binary_t *)output);
-}
-
-void cpupower_hash(const char* input, char* output, uint32_t len)
-{
-    	yespower_params_t yespower_1_0_cpupower =
-	{
-		.version = YESPOWER_1_0,
-		.N = 2048,
-		.r = 32,
-		.pers = "CPUpower: The number of CPU working or available for proof-of-work mining",
-		.perslen = 73
-    	};
-    	yespower_tls( input, len, &yespower_1_0_cpupower, (yespower_binary_t *)output);
-}
-
-void power2b_hash(const char* input, char* output, uint32_t len)
-{
-    	yespower_params_t yespower_b2b_power2b =
-	{
-		.version = YESPOWER_1_0,
-		.N = 2048,
-		.r = 32,
-		.pers = "Now I am become Death, the destroyer of worlds",
-		.perslen = 46
-    	};
-    	yespower_b2b_tls( input, len, &yespower_b2b_power2b, (yespower_binary_t *)output);
-}
-
-void yespowerMGPC_hash(const char* input, char* output, uint32_t len)
-{
-    yespower_params_t yespower_1_0_MGPC = {
-        .version = YESPOWER_1_0,
-        .N = 2048,
-        .r = 32,
-        .pers = "Magpies are birds of the Corvidae family.",
-        .perslen = 41
-    };
-    yespower_tls(input, len, &yespower_1_0_MGPC, (yespower_binary_t *)output);
-}
-
-void yespowerARWN_hash(const char* input, char* output, uint32_t len)
-{
-    yespower_params_t yespower_1_0_ARWN = {
-        .version = YESPOWER_1_0,
-        .N = 2048,
-        .r = 32,
-        .pers = (const uint8_t *)"ARWN",
-        .perslen = 4
-    };
-    yespower_tls(input, len, &yespower_1_0_ARWN, (yespower_binary_t *)output);
-}
-
-void yespowerADVC_hash(const char* input, char* output, uint32_t len)
-{
-    yespower_params_t yespower_1_0_ADVC = {
-        .version = YESPOWER_1_0,
-        .N = 2048,
-        .r = 32,
-        .pers = (const uint8_t *)"Let the quest begin",
-        .perslen = 19
-    };
-    yespower_tls(input, len, &yespower_1_0_ADVC, (yespower_binary_t *)output);
-}
-
-void yespowerEQPAY_hash(const char* input, char* output, uint32_t len)
-{
-    yespower_params_t yespower_1_0_EQPAY = {
-        .version = YESPOWER_1_0,
-        .N = 2048,
-        .r = 32,
-        .pers = (const uint8_t *)"The gods had gone away, and the ritual of the religion continued senselessly, uselessly.",
-        .perslen = 88
-    };
-    yespower_tls(input, len, &yespower_1_0_EQPAY, (yespower_binary_t *)output);
-}
-
-void interchained_hash(const char* input, char* output, uint32_t len)
-{
-    yespower_params_t yespower_1_0_interchained = {
-        .version = YESPOWER_1_0,
-        .N = 1024,
-        .r = 8,
-        .pers = NULL,
-        .perslen = 0
-    };
-    yespower_tls( input, len, &yespower_1_0_interchained, (yespower_binary_t *)output);
-}
-

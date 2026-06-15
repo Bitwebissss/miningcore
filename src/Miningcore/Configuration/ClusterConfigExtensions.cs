@@ -1,11 +1,8 @@
-using System.Globalization;
-using System.Numerics;
+using System.Reflection;
 using Autofac;
 using JetBrains.Annotations;
 using Miningcore.Crypto;
 using Miningcore.Crypto.Hashing.Algorithms;
-using Miningcore.Crypto.Hashing.Ethash;
-using Miningcore.Crypto.Hashing.Progpow;
 using NBitcoin;
 using Newtonsoft.Json;
 
@@ -25,30 +22,6 @@ public abstract partial class CoinTemplate
     /// </summary>
     [JsonIgnore]
     public string Source { get; set; }
-}
-
-public partial class AlephiumCoinTemplate
-{
-    #region Overrides of CoinTemplate
-
-    public override string GetAlgorithmName()
-    {
-        return "Blake3";
-    }
-
-    #endregion
-}
-
-public partial class BeamCoinTemplate
-{
-    #region Overrides of CoinTemplate
-
-    public override string GetAlgorithmName()
-    {
-        return "BeamHash";
-    }
-
-    #endregion
 }
 
 public partial class BitcoinTemplate
@@ -101,200 +74,14 @@ public partial class BitcoinTemplate
     {
         var hash = HeaderHasherValue;
 
-        if(hash.GetType() == typeof(DigestReverser))
-            return ((DigestReverser) hash).Upstream.GetType().Name;
+        var type = hash.GetType() == typeof(DigestReverser)
+            ? ((DigestReverser) hash).Upstream.GetType()
+            : hash.GetType();
 
-        return hash.GetType().Name;
-    }
-
-    #endregion
-}
-
-public partial class EquihashCoinTemplate
-{
-    public partial class EquihashNetworkParams
-    {
-        public EquihashNetworkParams()
-        {
-            diff1Value = new Lazy<Org.BouncyCastle.Math.BigInteger>(() =>
-            {
-                if(string.IsNullOrEmpty(Diff1))
-                    throw new InvalidOperationException("Diff1 has not yet been initialized");
-
-                return new Org.BouncyCastle.Math.BigInteger(Diff1, 16);
-            });
-
-            diff1BValue = new Lazy<BigInteger>(() =>
-            {
-                if(string.IsNullOrEmpty(Diff1))
-                    throw new InvalidOperationException("Diff1 has not yet been initialized");
-
-                return BigInteger.Parse(Diff1, NumberStyles.HexNumber);
-            });
-        }
-
-        private readonly Lazy<Org.BouncyCastle.Math.BigInteger> diff1Value;
-        private readonly Lazy<BigInteger> diff1BValue;
-
-        [JsonIgnore]
-        public Org.BouncyCastle.Math.BigInteger Diff1Value => diff1Value.Value;
-
-        [JsonIgnore]
-        public BigInteger Diff1BValue => diff1BValue.Value;
-
-        [JsonIgnore]
-        public ulong FoundersRewardSubsidySlowStartShift => FoundersRewardSubsidySlowStartInterval / 2;
-
-        [JsonIgnore]
-        public ulong LastFoundersRewardBlockHeight => FoundersRewardSubsidyHalvingInterval + FoundersRewardSubsidySlowStartShift - 1;
-    }
-
-    public EquihashNetworkParams GetNetwork(ChainName chain)
-    {
-        if(chain == ChainName.Mainnet)
-            return Networks["main"];
-        else if(chain == ChainName.Testnet)
-            return Networks["test"];
-        else if(chain == ChainName.Regtest)
-            return Networks["regtest"];
-
-        throw new NotSupportedException("unsupported network type");
-    }
-
-    #region Overrides of CoinTemplate
-
-    public override string GetAlgorithmName()
-    {
-        switch(Symbol)
-        {
-            case "VRSC":
-                return "Verushash";
-            default:
-                // TODO: return variant
-                return "Equihash";
-        }
-    }
-
-    #endregion
-}
-
-public partial class ConcealCoinTemplate
-{
-    #region Overrides of CoinTemplate
-
-    public override string GetAlgorithmName()
-    {
-//        switch(Hash)
-//        {
-//            case CryptonightHashType.RandomX:
-//                return "RandomX";
-//        }
-
-        return Hash.ToString();
-    }
-
-    #endregion
-}
-
-public partial class CryptonoteCoinTemplate
-{
-    #region Overrides of CoinTemplate
-
-    public override string GetAlgorithmName()
-    {
-//        switch(Hash)
-//        {
-//            case CryptonightHashType.RandomX:
-//                return "RandomX";
-//        }
-
-        return Hash.ToString();
-    }
-
-    #endregion
-}
-
-public partial class ErgoCoinTemplate
-{
-    #region Overrides of CoinTemplate
-
-    public override string GetAlgorithmName()
-    {
-        return "Autolykos";
-    }
-
-    #endregion
-}
-
-public partial class EthereumCoinTemplate
-{
-    #region Overrides of CoinTemplate
-    
-    public EthereumCoinTemplate()
-    {
-        ethashLightValue = new Lazy<IEthashLight>(() =>
-            EthashFactory.GetEthash(Symbol, ComponentContext, Ethasher));
-    }
-
-    private readonly Lazy<IEthashLight> ethashLightValue;
-
-    public IComponentContext ComponentContext { get; [UsedImplicitly] init; }
-
-    public IEthashLight Ethash => ethashLightValue.Value;
-
-    public override string GetAlgorithmName()
-    {
-        return Ethash.AlgoName;
-    }
-
-    #endregion
-}
-
-public partial class KaspaCoinTemplate
-{
-    #region Overrides of CoinTemplate
-
-    public override string GetAlgorithmName()
-    {
-        switch(Symbol)
-        {
-            case "CSS":
-            case "PUG":
-            case "KLS":
-            case "NTL":
-            case "NXL":
-                return "Karlsenhash";
-            case "CAS":
-            case "HTN":
-            case "KODA":
-            case "PYI":
-                return "Pyrinhash";
-            default:
-                // TODO: return variant
-                return "kHeavyHash";
-        }
-    }
-
-    #endregion
-}
-
-public partial class ProgpowCoinTemplate
-{
-    #region Overrides of CoinTemplate
-    
-    public ProgpowCoinTemplate() : base()
-    {
-        progpowLightValue = new Lazy<IProgpowLight>(() =>
-            ProgpowFactory.GetProgpow(Symbol, ComponentContext, Progpower));
-    }
-
-    private readonly Lazy<IProgpowLight> progpowLightValue;
-
-    public IProgpowLight ProgpowHasher => progpowLightValue.Value;
-
-    public override string GetAlgorithmName()
-    {
-        return ProgpowHasher.AlgoName;
+        // Prefer the [Identifier] attribute — it's the canonical miner-facing name
+        // (e.g. "argon2id1024", "sha256d"). Falls back to the C# class name only
+        // for implementations that haven't declared the attribute yet.
+        return type.GetCustomAttribute<IdentifierAttribute>()?.Name ?? type.Name;
     }
 
     #endregion

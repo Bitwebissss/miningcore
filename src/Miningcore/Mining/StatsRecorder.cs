@@ -6,7 +6,7 @@ using System.Reactive.Concurrency;
 using System.Reactive.Disposables;
 using System.Reactive.Linq;
 using Autofac;
-using AutoMapper;
+using MapsterMapper;
 using Microsoft.Extensions.Hosting;
 using Miningcore.Configuration;
 using Miningcore.Contracts;
@@ -20,6 +20,7 @@ using Miningcore.Time;
 using Miningcore.Util;
 using NLog;
 using Polly;
+using Polly.Retry;
 
 namespace Miningcore.Mining;
 
@@ -32,6 +33,7 @@ public class StatsRecorder : BackgroundService
         IMapper mapper,
         ClusterConfig clusterConfig,
         IShareRepository shareRepo,
+        IBlockRepository blocksRepo,
         IStatsRepository statsRepo)
     {
         Contract.RequiresNonNull(ctx);
@@ -40,6 +42,7 @@ public class StatsRecorder : BackgroundService
         Contract.RequiresNonNull(messageBus);
         Contract.RequiresNonNull(mapper);
         Contract.RequiresNonNull(shareRepo);
+        Contract.RequiresNonNull(blocksRepo);
         Contract.RequiresNonNull(statsRepo);
 
         this.clock = clock;
@@ -47,6 +50,7 @@ public class StatsRecorder : BackgroundService
         this.mapper = mapper;
         this.messageBus = messageBus;
         this.shareRepo = shareRepo;
+        this.blocksRepo = blocksRepo;
         this.statsRepo = statsRepo;
         this.clusterConfig = clusterConfig;
 
@@ -64,6 +68,7 @@ public class StatsRecorder : BackgroundService
     private readonly IMapper mapper;
     private readonly IMessageBus messageBus;
     private readonly IShareRepository shareRepo;
+    private readonly IBlockRepository blocksRepo;
     private readonly ClusterConfig clusterConfig;
     private readonly CompositeDisposable disposables = new();
     private readonly ConcurrentDictionary<string, IMiningPool> pools = new();
@@ -72,7 +77,7 @@ public class StatsRecorder : BackgroundService
     private readonly TimeSpan gcInterval;
     private readonly TimeSpan hashrateCalculationWindow;
     private const int RetryCount = 4;
-    private IAsyncPolicy readFaultPolicy;
+    private ResiliencePipeline readFaultPipeline;
 
     private static readonly ILogger logger = LogManager.GetCurrentClassLogger();
 
@@ -109,8 +114,8 @@ public class StatsRecorder : BackgroundService
             var pool = pools[poolId];
 
             // fetch stats for window
-            var result = await readFaultPolicy.ExecuteAsync(() =>
-                cf.Run(con => shareRepo.GetHashAccumulationBetweenAsync(con, poolId, timeFrom, now, ct)));
+            var result = await readFaultPipeline.ExecuteAsync(async _ =>
+                await cf.Run(con => shareRepo.GetHashAccumulationBetweenAsync(con, poolId, timeFrom, now, ct)), ct);
 
             var byMiner = result.GroupBy(x => x.Miner).ToArray();
 
@@ -118,12 +123,6 @@ public class StatsRecorder : BackgroundService
             {
                 // pool miners
                 pool.PoolStats.ConnectedMiners = byMiner.Length; // update connected miners
-
-                // Stats calc windows
-                var timeFrameBeforeFirstShare = ((result.Min(x => x.FirstShare) - timeFrom).TotalSeconds);
-                var timeFrameAfterLastShare   = ((now - result.Max(x => x.LastShare)).TotalSeconds);
-                var timeFrameFirstLastShare   = (hashrateCalculationWindow.TotalSeconds - timeFrameBeforeFirstShare - timeFrameAfterLastShare);
-                //var poolHashTimeFrame         = Math.Floor(TimeFrameFirstLastShare + (TimeFrameBeforeFirstShare / 3) + (TimeFrameAfterLastShare * 3)) ;
 
                 var poolHashTimeFrame = hashrateCalculationWindow.TotalSeconds;
 
@@ -135,8 +134,6 @@ public class StatsRecorder : BackgroundService
                 // pool shares
                 var poolHashesCountAccumulated = result.Sum(x => x.Count);
                 pool.PoolStats.SharesPerSecond = Math.Round(poolHashesCountAccumulated / poolHashTimeFrame, 3);
-
-                messageBus.NotifyHashrateUpdated(pool.Config.Id, poolHashrate);
             }
 
             else
@@ -145,8 +142,6 @@ public class StatsRecorder : BackgroundService
                 pool.PoolStats.ConnectedMiners = 0;
                 pool.PoolStats.PoolHashrate = 0;
                 pool.PoolStats.SharesPerSecond = 0;
-
-                messageBus.NotifyHashrateUpdated(pool.Config.Id, 0);
 
                 logger.Info(() => $"[{poolId}] Reset performance stats for pool");
             }
@@ -165,6 +160,29 @@ public class StatsRecorder : BackgroundService
 
                 await statsRepo.InsertPoolStatsAsync(con, tx, mapped, ct);
             });
+
+            // push cycle stats via WS — pool-level metrics only
+            try
+            {
+                var lastBlockTime = await cf.Run(con => blocksRepo.GetLastPoolBlockTimeAsync(con, poolId, ct));
+
+                double? poolEffort = null;
+                if(lastBlockTime.HasValue)
+                    poolEffort = await cf.Run(con => shareRepo.GetEffortBetweenCreatedAsync(
+                        con, poolId, pool.ShareMultiplier, lastBlockTime.Value, now, ct));
+
+                messageBus.NotifyCycleStats(
+                    pool.Config.Id,
+                    pool.PoolStats.PoolHashrate,
+                    pool.PoolStats.ConnectedMiners,
+                    pool.PoolStats.SharesPerSecond,
+                    pool.NetworkStats.ConnectedPeers,
+                    poolEffort);
+            }
+            catch(Exception ex)
+            {
+                logger.Warn(ex, $"[{poolId}] Failed to push cycle stats WS event");
+            }
 
             // retrieve most recent miner/worker non-zero hashrate sample
             var previousMinerWorkerHashrates = await cf.Run(con =>
@@ -231,17 +249,12 @@ public class StatsRecorder : BackgroundService
                         // persist
                         await statsRepo.InsertMinerWorkerPerformanceStatsAsync(con, tx, stats, ct);
 
-                        // broadcast
-                        messageBus.NotifyHashrateUpdated(pool.Config.Id, minerHashrate, stats.Miner, stats.Worker);
-
                         logger.Info(() => $"[{poolId}] Worker {stats.Miner}{(!string.IsNullOrEmpty(stats.Worker) ? $".{stats.Worker}" : string.Empty)}: {FormatUtil.FormatHashrate(minerHashrate)}, {stats.SharesPerSecond} shares/sec");
 
                         // book keeping
                         currentNonZeroMinerWorkers.Add(BuildKey(stats.Miner, stats.Worker));
                     }
                 });
-
-                messageBus.NotifyHashrateUpdated(pool.Config.Id, minerTotalHashrate, stats.Miner, null);
 
                 logger.Info(() => $"[{poolId}] Miner {stats.Miner}: {FormatUtil.FormatHashrate(minerTotalHashrate)}");
             }
@@ -268,9 +281,6 @@ public class StatsRecorder : BackgroundService
 
                         // persist
                         await statsRepo.InsertMinerWorkerPerformanceStatsAsync(con, tx, stats, ct);
-
-                        // broadcast
-                        messageBus.NotifyHashrateUpdated(pool.Config.Id, 0, stats.Miner, stats.Worker);
 
                         if(string.IsNullOrEmpty(stats.Worker))
                             logger.Info(() => $"[{poolId}] Reset performance stats for miner {stats.Miner}");
@@ -352,18 +362,22 @@ public class StatsRecorder : BackgroundService
 
     private void BuildFaultHandlingPolicy()
     {
-        var retry = Policy
-            .Handle<DbException>()
-            .Or<SocketException>()
-            .Or<TimeoutException>()
-            .RetryAsync(RetryCount, OnPolicyRetry);
-
-        readFaultPolicy = retry;
-    }
-
-    private static void OnPolicyRetry(Exception ex, int retry, object context)
-    {
-        logger.Warn(() => $"Retry {retry} due to {ex.Source}: {ex.GetType().Name} ({ex.Message})");
+        readFaultPipeline = new ResiliencePipelineBuilder()
+            .AddRetry(new RetryStrategyOptions
+            {
+                ShouldHandle = new PredicateBuilder()
+                    .Handle<DbException>()
+                    .Handle<SocketException>()
+                    .Handle<TimeoutException>(),
+                MaxRetryAttempts = RetryCount,
+                OnRetry = args =>
+                {
+                    logger.Warn(() => $"Retry {args.AttemptNumber + 1} due to " +
+                        $"{args.Outcome.Exception?.Source}: {args.Outcome.Exception?.GetType().Name} ({args.Outcome.Exception?.Message})");
+                    return default;
+                }
+            })
+            .Build();
     }
 
     protected override async Task ExecuteAsync(CancellationToken ct)
@@ -374,6 +388,9 @@ public class StatsRecorder : BackgroundService
             disposables.Add(messageBus.Listen<PoolStatusNotification>()
                 .ObserveOn(TaskPoolScheduler.Default)
                 .Subscribe(OnPoolStatusNotification));
+
+            // WS notifications for block events are handled by BlockClassifierService,
+            // which sends blockfoundstats / chainheightstats AFTER classification completes.
 
             logger.Info(() => "Online");
 

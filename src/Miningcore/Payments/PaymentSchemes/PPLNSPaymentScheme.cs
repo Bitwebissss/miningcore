@@ -10,6 +10,7 @@ using Miningcore.Persistence.Repositories;
 using Miningcore.Util;
 using NLog;
 using Polly;
+using Polly.Retry;
 using Contract = Miningcore.Contracts.Contract;
 
 namespace Miningcore.Payments.PaymentSchemes;
@@ -46,7 +47,7 @@ public class PPLNSPaymentScheme : IPayoutScheme
     private static readonly ILogger logger = LogManager.GetLogger("PPLNS Payment");
 
     private const int RetryCount = 4;
-    private IAsyncPolicy shareReadFaultPolicy;
+    private ResiliencePipeline shareReadFaultPolicy;
 
     private class Config
     {
@@ -114,8 +115,8 @@ public class PPLNSPaymentScheme : IPayoutScheme
         {
             logger.Info(() => $"Fetching page {currentPage} of discarded shares for pool {poolConfig.Id}, block {block.BlockHeight}");
 
-            var page = await shareReadFaultPolicy.ExecuteAsync(() =>
-                cf.Run(con => shareRepo.ReadSharesBeforeAsync(con, poolConfig.Id, before, false, pageSize, ct)));
+            var page = await shareReadFaultPolicy.ExecuteAsync(async _ =>
+                await cf.Run(con => shareRepo.ReadSharesBeforeAsync(con, poolConfig.Id, before, false, pageSize, ct)), ct);
 
             currentPage++;
 
@@ -125,10 +126,7 @@ public class PPLNSPaymentScheme : IPayoutScheme
                 var address = share.Miner;
 
                 // record attributed shares for diagnostic purposes
-                if(!shares.ContainsKey(address))
-                    shares[address] = share.Difficulty;
-                else
-                    shares[address] += share.Difficulty;
+                shares[address] = shares.TryGetValue(address, out var e1) ? e1 + share.Difficulty : share.Difficulty;
             }
 
             if(page.Length < pageSize)
@@ -168,8 +166,8 @@ public class PPLNSPaymentScheme : IPayoutScheme
         {
             logger.Info(() => $"Fetching page {currentPage} of shares for pool {poolConfig.Id}, block {block.BlockHeight}");
 
-            var page = await shareReadFaultPolicy.ExecuteAsync(() =>
-                cf.Run(con => shareRepo.ReadSharesBeforeAsync(con, poolConfig.Id, before, inclusive, pageSize, ct)));
+            var page = await shareReadFaultPolicy.ExecuteAsync(async _ =>
+                await cf.Run(con => shareRepo.ReadSharesBeforeAsync(con, poolConfig.Id, before, inclusive, pageSize, ct)), ct);
 
             inclusive = false;
             currentPage++;
@@ -182,10 +180,7 @@ public class PPLNSPaymentScheme : IPayoutScheme
                 var shareDiffAdjusted = payoutHandler.AdjustShareDifficulty(share.Difficulty);
 
                 // record attributed shares for diagnostic purposes
-                if(!shares.ContainsKey(address))
-                    shares[address] = shareDiffAdjusted;
-                else
-                    shares[address] += shareDiffAdjusted;
+                shares[address] = shares.TryGetValue(address, out var e2) ? e2 + shareDiffAdjusted : shareDiffAdjusted;
 
                 var score = (decimal) (shareDiffAdjusted / share.NetworkDifficulty);
 
@@ -209,10 +204,7 @@ public class PPLNSPaymentScheme : IPayoutScheme
                 if(reward > 0)
                 {
                     // accumulate miner reward
-                    if(!rewards.ContainsKey(address))
-                        rewards[address] = reward;
-                    else
-                        rewards[address] += reward;
+                    rewards[address] = rewards.TryGetValue(address, out var e3) ? e3 + reward : reward;
                 }
             }
 
@@ -229,13 +221,22 @@ public class PPLNSPaymentScheme : IPayoutScheme
 
     private void BuildFaultHandlingPolicy()
     {
-        var retry = Policy
-            .Handle<DbException>()
-            .Or<SocketException>()
-            .Or<TimeoutException>()
-            .RetryAsync(RetryCount, OnPolicyRetry);
-
-        shareReadFaultPolicy = retry;
+        shareReadFaultPolicy = new ResiliencePipelineBuilder()
+            .AddRetry(new RetryStrategyOptions
+            {
+                ShouldHandle = new PredicateBuilder()
+                    .Handle<DbException>()
+                    .Handle<SocketException>()
+                    .Handle<TimeoutException>(),
+                MaxRetryAttempts = RetryCount,
+                Delay = TimeSpan.Zero,
+                OnRetry = args =>
+                {
+                    OnPolicyRetry(args.Outcome.Exception, args.AttemptNumber + 1, null);
+                    return ValueTask.CompletedTask;
+                }
+            })
+            .Build();
     }
 
     private static void OnPolicyRetry(Exception ex, int retry, object context)

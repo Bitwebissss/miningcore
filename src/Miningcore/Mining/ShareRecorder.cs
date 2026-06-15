@@ -4,7 +4,7 @@ using System.Reactive.Concurrency;
 using System.Reactive.Linq;
 using System.Reactive.Threading.Tasks;
 using System.Text;
-using AutoMapper;
+using MapsterMapper;
 using Microsoft.Extensions.Hosting;
 using Miningcore.Configuration;
 using Miningcore.Extensions;
@@ -17,6 +17,7 @@ using Newtonsoft.Json;
 using NLog;
 using Polly;
 using Polly.CircuitBreaker;
+using Polly.Retry;
 using Contract = Miningcore.Contracts.Contract;
 using Share = Miningcore.Blockchain.Share;
 using static Miningcore.Util.ActionUtils;
@@ -68,22 +69,32 @@ public class ShareRecorder : BackgroundService
     private readonly Dictionary<string, PoolConfig> pools;
     private readonly IMapper mapper;
 
-    private IAsyncPolicy faultPolicy;
+    private ResiliencePipeline faultPipeline;
     private bool hasLoggedPolicyFallbackFailure;
     private string recoveryFilename;
     private const int RetryCount = 3;
-    private const string PolicyContextKeyShares = "share";
     private bool notifiedAdminOnPolicyFallback = false;
 
     private async Task PersistSharesAsync(IList<Share> shares)
     {
-        var context = new Dictionary<string, object> { { PolicyContextKeyShares, shares } };
-
-        await faultPolicy.ExecuteAsync(ctx => PersistSharesCoreAsync((IList<Share>) ctx[PolicyContextKeyShares]), context);
+        try
+        {
+            await faultPipeline.ExecuteAsync(async _ => await PersistSharesCoreAsync(shares));
+        }
+        catch(Exception ex)
+        {
+            await OnFallbackAsync(ex, shares);
+        }
     }
 
     private async Task PersistSharesCoreAsync(IList<Share> shares)
     {
+        // Collect block notifications to fire AFTER the transaction commits.
+        // Firing inside RunTx (before CommitAsync) creates a race: a thread-pool subscriber
+        // could query the DB before the block is visible (READ COMMITTED), find 0 pending
+        // blocks and bail out early.  Post-commit the block is guaranteed visible.
+        var pendingNotifications = new List<(string poolId, Block block, CoinTemplate template)>();
+
         await cf.RunTx(async (con, tx) =>
         {
             // Insert shares
@@ -101,53 +112,53 @@ public class ShareRecorder : BackgroundService
                 await blockRepo.InsertAsync(con, tx, blockEntity);
 
                 if(pools.TryGetValue(share.PoolId, out var poolConfig))
-                    messageBus.NotifyBlockFound(share.PoolId, blockEntity, poolConfig.Template);
+                    pendingNotifications.Add((share.PoolId, blockEntity, poolConfig.Template));
                 else
                     logger.Warn(()=> $"Block found for unknown pool {share.PoolId}");
             }
         });
+
+        // Transaction committed — block is now visible to all connections.
+        // Fire notifications here so classifier and stats recorder see the block.
+        foreach(var (poolId, block, template) in pendingNotifications)
+        {
+            try
+            {
+                messageBus.NotifyBlockFound(poolId, block, template);
+            }
+            catch(Exception ex)
+            {
+                logger.Warn(ex, $"[{poolId}] Failed to push block found notification for block {block.BlockHeight}");
+            }
+        }
     }
 
-    private static void OnPolicyRetry(Exception ex, TimeSpan timeSpan, int retry, object context)
-    {
-        logger.Warn(() => $"Retry {retry} in {timeSpan} due to {ex.Source}: {ex.GetType().Name} ({ex.Message})");
-    }
-
-    private Task OnPolicyFallbackAsync(Exception ex, Context context)
+    private async Task OnFallbackAsync(Exception ex, IList<Share> shares)
     {
         logger.Warn(() => $"Fallback due to {ex.Source}: {ex.GetType().Name} ({ex.Message})");
-        return Task.CompletedTask;
-    }
-
-    private async Task OnExecutePolicyFallbackAsync(Context context, CancellationToken ct)
-    {
-        var shares = (IList<Share>) context[PolicyContextKeyShares];
 
         try
         {
-            await using(var stream = new FileStream(recoveryFilename, FileMode.Append, FileAccess.Write))
-            {
-                await using(var writer = new StreamWriter(stream, new UTF8Encoding(false)))
-                {
-                    if(stream.Length == 0)
-                        WriteRecoveryFileheader(writer);
+            await using var stream = new FileStream(recoveryFilename, FileMode.Append, FileAccess.Write);
+            await using var writer = new StreamWriter(stream, new UTF8Encoding(false));
 
-                    foreach(var share in shares)
-                    {
-                        var json = JsonConvert.SerializeObject(share, jsonSerializerSettings);
-                        await writer.WriteLineAsync(json);
-                    }
-                }
+            if(stream.Length == 0)
+                WriteRecoveryFileheader(writer);
+
+            foreach(var share in shares)
+            {
+                var json = JsonConvert.SerializeObject(share, jsonSerializerSettings);
+                await writer.WriteLineAsync(json);
             }
 
             NotifyAdminOnPolicyFallback();
         }
 
-        catch(Exception ex)
+        catch(Exception fallbackEx)
         {
             if(!hasLoggedPolicyFallbackFailure)
             {
-                logger.Fatal(ex, "Fatal error during policy fallback execution. Share(s) will be lost!");
+                logger.Fatal(fallbackEx, "Fatal error during policy fallback execution. Share(s) will be lost!");
                 hasLoggedPolicyFallbackFailure = true;
             }
         }
@@ -177,9 +188,12 @@ public class ShareRecorder : BackgroundService
                     var shares = new List<Share>();
                     var lastProgressUpdate = DateTime.UtcNow;
 
-                    while(!reader.EndOfStream)
+                    while(true)
                     {
                         var line = await reader.ReadLineAsync();
+
+                        if(line == null)
+                            break;
 
                         if(string.IsNullOrEmpty(line))
                             continue;
@@ -268,8 +282,10 @@ public class ShareRecorder : BackgroundService
 
     private void NotifyAdminOnPolicyFallback()
     {
+        // After the first clause evaluates to true, Notifications and Admin are both non-null.
+        // The second clause can therefore drop the redundant ?. chains.
         if(clusterConfig.Notifications?.Admin?.Enabled == true &&
-           clusterConfig.Notifications?.Admin?.NotifyPaymentSuccess == true &&
+           clusterConfig.Notifications.Admin.NotifyPaymentSuccess &&
            !notifiedAdminOnPolicyFallback)
         {
             notifiedAdminOnPolicyFallback = true;
@@ -288,35 +304,37 @@ public class ShareRecorder : BackgroundService
 
     private void BuildFaultHandlingPolicy()
     {
-        // retry with increasing delay (1s, 2s, 4s etc)
-        var retry = Policy
-            .Handle<DbException>()
-            .Or<SocketException>()
-            .Or<TimeoutException>()
-            .WaitAndRetryAsync(RetryCount, retryAttempt => TimeSpan.FromSeconds(Math.Pow(2, retryAttempt)),
-                OnPolicyRetry);
-
-        // after retries failed several times, break the circuit and fall through to
-        // fallback action for one minute, not attempting further retries during that period
-        var breaker = Policy
-            .Handle<DbException>()
-            .Or<SocketException>()
-            .Or<TimeoutException>()
-            .CircuitBreakerAsync(2, TimeSpan.FromMinutes(1));
-
-        var fallback = Policy
-            .Handle<DbException>()
-            .Or<SocketException>()
-            .Or<TimeoutException>()
-            .FallbackAsync(OnExecutePolicyFallbackAsync, OnPolicyFallbackAsync);
-
-        var fallbackOnBrokenCircuit = Policy
-            .Handle<BrokenCircuitException>()
-            .FallbackAsync(OnExecutePolicyFallbackAsync, (ex, context) => Task.CompletedTask);
-
-        faultPolicy = Policy.WrapAsync(
-            fallbackOnBrokenCircuit,
-            Policy.WrapAsync(fallback, breaker, retry));
+        faultPipeline = new ResiliencePipelineBuilder()
+            .AddRetry(new RetryStrategyOptions
+            {
+                ShouldHandle = new PredicateBuilder()
+                    .Handle<DbException>()
+                    .Handle<SocketException>()
+                    .Handle<TimeoutException>(),
+                MaxRetryAttempts = RetryCount,
+                // exponential back-off: 2s, 4s, 8s — same as old WaitAndRetryAsync
+                DelayGenerator = args => new ValueTask<TimeSpan?>(
+                    TimeSpan.FromSeconds(Math.Pow(2, args.AttemptNumber + 1))),
+                OnRetry = args =>
+                {
+                    logger.Warn(() => $"Retry {args.AttemptNumber + 1} in {args.RetryDelay} due to " +
+                        $"{args.Outcome.Exception?.Source}: {args.Outcome.Exception?.GetType().Name} ({args.Outcome.Exception?.Message})");
+                    return default;
+                }
+            })
+            .AddCircuitBreaker(new CircuitBreakerStrategyOptions
+            {
+                ShouldHandle = new PredicateBuilder()
+                    .Handle<DbException>()
+                    .Handle<SocketException>()
+                    .Handle<TimeoutException>(),
+                // open after 2 consecutive failures, stay open for 1 minute
+                FailureRatio = 1.0,
+                MinimumThroughput = 2,
+                SamplingDuration = TimeSpan.FromSeconds(30),
+                BreakDuration = TimeSpan.FromMinutes(1)
+            })
+            .Build();
     }
 
     protected override Task ExecuteAsync(CancellationToken ct)

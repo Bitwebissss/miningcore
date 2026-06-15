@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using NBitcoin;
 using NBitcoin.DataEncoders;
 
@@ -31,26 +30,17 @@ public static class BitcoinUtils
         var decoded = encoder.Decode(address, out var witVersion);
         var result = new WitKeyId(decoded);
 
-        Debug.Assert(result.GetAddress(expectedNetwork).ToString() == address);
         return result;
     }
 
-    public static IDestination BCashAddressToDestination(string address, Network expectedNetwork)
+    public static IDestination TaprootAddressToDestination(string address, string bechPrefix)
     {
-        var bcash = NBitcoin.Altcoins.BCash.Instance.GetNetwork(expectedNetwork.ChainName);
-        var trashAddress = bcash.Parse<NBitcoin.Altcoins.BCash.BTrashPubKeyAddress>(address);
-        return trashAddress.ScriptPubKey.GetDestinationAddress(bcash);
-    }
-
-    public static IDestination LitecoinAddressToDestination(string address, Network expectedNetwork)
-    {
-        var litecoin = NBitcoin.Altcoins.Litecoin.Instance.GetNetwork(expectedNetwork.ChainName);
-        var encoder = litecoin.GetBech32Encoder(Bech32Type.WITNESS_PUBKEY_ADDRESS, true);
-
-        var decoded = encoder.Decode(address, out var witVersion);
-        var result = new WitKeyId(decoded);
-
-        Debug.Assert(result.GetAddress(litecoin).ToString() == address);
-        return result;
+        // Decode bech32m bypassing network HRP validation (same pattern as BechSegwit)
+        // Decode() auto-detects bech32 vs bech32m checksum internally via polymod
+        var encoder = Encoders.Bech32(bechPrefix);
+        var decoded = encoder.Decode(address, out _);
+        if (!TaprootPubKey.TryCreate(decoded, out var pubkey))
+            throw new FormatException($"Invalid taproot pubkey from address {address}");
+        return pubkey;
     }
 }

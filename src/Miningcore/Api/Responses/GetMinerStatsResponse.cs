@@ -1,12 +1,5 @@
 namespace Miningcore.Api.Responses;
 
-public class MinerPerformanceStats
-{
-    public string Miner { get; set; }
-    public double Hashrate { get; set; }
-    public double SharesPerSecond { get; set; }
-}
-
 public class WorkerPerformanceStats
 {
     public double Hashrate { get; set; }
@@ -28,6 +21,10 @@ public class MinerStats
     public double MinerEffort { get; set; }
     public DateTime? LastPayment { get; set; }
     public string LastPaymentLink { get; set; }
+    public long TotalConfirmedBlocks { get; set; }
+    public long TotalPendingBlocks { get; set; }
+    public long TotalOrphanedBlocks { get; set; }
+    public int WorkersOnline { get; set; }
+    public int WorkersOffline { get; set; }
     public WorkerPerformanceStatsContainer Performance { get; set; }
-    public WorkerPerformanceStatsContainer[] PerformanceSamples { get; set; }
 }

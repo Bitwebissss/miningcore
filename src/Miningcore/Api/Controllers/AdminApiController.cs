@@ -46,9 +46,6 @@ public class AdminApiController : ApiControllerBase
         if (logLevel == null)
             throw new ApiException("Invalid logging level", HttpStatusCode.BadRequest);
 
-        logger.Error("Admin update Logging Level this is Error");
-        logger.Trace("Admin update Logging Level this is Trace");
-
         foreach (var rule in LogManager.Configuration.LoggingRules)
         {
             rule.EnableLoggingForLevel(logLevel);
@@ -68,10 +65,7 @@ public class AdminApiController : ApiControllerBase
 
         LogManager.ReconfigExistingLoggers();
 
-        logger.Error("Admin update Logging Level this is Error AFTER");
-        logger.Trace("Admin update Logging Level this is Trace AFTER");
-
-        logger.Info($"Logging level set to {level}");
+        logger.Info($"Logging level set to {logLevel}");
         return "Ok";
     }
 
@@ -145,7 +139,6 @@ public class AdminApiController : ApiControllerBase
         return "Payment Disable Successfully";
     }
 
-    // testing pool id enable / disable on admin api start here
     [HttpGet("{poolId}/enable")]
     public ActionResult<string> EnablePoolId(string poolId)
     {
@@ -157,8 +150,8 @@ public class AdminApiController : ApiControllerBase
             return "-1";
 
         poolInstance.Config.Enabled = true;
-        logger.Info(()=> $"Enabled pool ID{poolId}");
-        return "{poolId} Enabled Successfully";
+        logger.Info(()=> $"Enabled pool {poolId}");
+        return $"{poolId} Enabled Successfully";
     }
 
     [HttpGet("{poolId}/disable")]
@@ -172,10 +165,9 @@ public class AdminApiController : ApiControllerBase
             return "-1";
 
         poolInstance.Config.Enabled = false;
-        logger.Info(()=> $"Disabled pool Id{poolId}");
-        return "{poolId} Disabled Successfully";
+        logger.Info(()=> $"Disabled pool {poolId}");
+        return $"{poolId} Disabled Successfully";
     }
-    // testing pool id enable / disable on admin api end here
 
     [HttpGet("stats/gc")]
     public ActionResult<Responses.AdminGcStats> GetGcStats()

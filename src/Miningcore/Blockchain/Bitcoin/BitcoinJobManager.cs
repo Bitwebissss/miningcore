@@ -1,7 +1,6 @@
 using Autofac;
 using Miningcore.Blockchain.Bitcoin.Configuration;
 using Miningcore.Blockchain.Bitcoin.DaemonResponses;
-using Miningcore.Blockchain.Bitcoin.Custom.AdventurecoinJob;
 using Miningcore.Configuration;
 using Miningcore.Contracts;
 using Miningcore.Crypto;
@@ -14,7 +13,6 @@ using Miningcore.Time;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using NLog;
-using Org.BouncyCastle.Crypto.Parameters;
 
 namespace Miningcore.Blockchain.Bitcoin;
 
@@ -35,17 +33,6 @@ public class BitcoinJobManager : BitcoinJobManagerBase<BitcoinJob>
     {
         var result = base.GetBlockTemplateParams();
         
-        if(coin.HasMWEB)
-        {
-            result = new object[]
-            {
-                new
-                {
-                    rules = new[] {"segwit", "mweb"},
-                }
-            };
-        }
-
         if(coin.BlockTemplateRpcExtraParams != null)
         {
             if(coin.BlockTemplateRpcExtraParams.Type == JTokenType.Array)
@@ -107,13 +94,7 @@ public class BitcoinJobManager : BitcoinJobManagerBase<BitcoinJob>
 
     private BitcoinJob CreateJob()
     {
-        switch(coin.Symbol)
-        {
-            case "ADVC":
-                return new AdventurecoinJob();
-        }
-
-        return new();
+        return new BitcoinJob();
     }
 
     protected override void PostChainIdentifyConfigure()
@@ -146,15 +127,15 @@ public class BitcoinJobManager : BitcoinJobManagerBase<BitcoinJob>
             }
 
             var blockTemplate = response.Response;
+            if(blockTemplate == null)
+                return (false, forceUpdate);
+
             var job = currentJob;
 
             var isNew = job == null ||
-                (blockTemplate != null &&
-                    (job.BlockTemplate?.PreviousBlockhash != blockTemplate.PreviousBlockhash ||
-                        blockTemplate.Height > job.BlockTemplate?.Height));
-
-            if(isNew)
-                messageBus.NotifyChainHeight(poolConfig.Id, blockTemplate.Height, poolConfig.Template);
+                // blockTemplate is guaranteed non-null: the guard above already returned if null
+                (job.BlockTemplate?.PreviousBlockhash != blockTemplate.PreviousBlockhash ||
+                    blockTemplate.Height > job.BlockTemplate?.Height);
 
             if(isNew || forceUpdate)
             {
@@ -165,15 +146,6 @@ public class BitcoinJobManager : BitcoinJobManagerBase<BitcoinJob>
                     ShareMultiplier, coin.CoinbaseHasherValue, coin.HeaderHasherValue,
                     !isPoS ? coin.BlockHasherValue : coin.PoSBlockHasherValue ?? coin.BlockHasherValue);
 
-                lock(jobLock)
-                {
-                    validJobs.Insert(0, job);
-
-                    // trim active jobs
-                    while(validJobs.Count > maxActiveJobs)
-                        validJobs.RemoveAt(validJobs.Count - 1);
-                }
-
                 if(isNew)
                 {
                     if(via != null)
@@ -181,12 +153,29 @@ public class BitcoinJobManager : BitcoinJobManagerBase<BitcoinJob>
                     else
                         logger.Info(() => $"Detected new block {blockTemplate.Height}");
 
-                    // update stats
-                    BlockchainStats.LastNetworkBlockTime = clock.Now;
-                    BlockchainStats.BlockHeight = blockTemplate.Height;
-                    BlockchainStats.NetworkDifficulty = job.Difficulty;
-                    BlockchainStats.NextNetworkTarget = blockTemplate.Target;
-                    BlockchainStats.NextNetworkBits = blockTemplate.Bits;
+                    // update stats — lock shared with UpdateNetworkStatsAsync (timer, independent
+                    // Rx Concat chain) and ShareReceiver.ProcessMessage (ThreadPool workers).
+                    lock(BlockchainStats.SyncRoot)
+                    {
+                        BlockchainStats.LastNetworkBlockTime = clock.Now;
+                        BlockchainStats.BlockHeight = blockTemplate.Height;
+                        BlockchainStats.NetworkBlockHeight = blockTemplate.Height > 0 ? blockTemplate.Height - 1 : 0;
+                        BlockchainStats.NetworkDifficulty = job.Difficulty;
+                        BlockchainStats.NextNetworkTarget = blockTemplate.Target;
+                        BlockchainStats.NextNetworkBits = blockTemplate.Bits;
+                    }
+
+                    // Notify AFTER BlockchainStats is updated so subscribers see current height,
+                    // difficulty and LastNetworkBlockTime rather than values from the previous block.
+                    //
+                    // isFromPoolBlockFind: when UpdateJob was triggered by our own block submission
+                    // (JobRefreshBy.BlockFound), mark the notification so BlockClassifierService can
+                    // skip the redundant network-path classification run.  A BlockFoundNotification
+                    // is already en-route (fired by ShareRecorder after DB commit) and will trigger
+                    // the correct pool-path run with fresh data.
+                    messageBus.NotifyChainHeight(poolConfig.Id, blockTemplate.Height,
+                        blockTemplate.Height > 0 ? blockTemplate.Height - 1 : 0, poolConfig.Template,
+                        isFromPoolBlockFind: via == JobRefreshBy.BlockFound);
                 }
 
                 else
@@ -222,6 +211,11 @@ public class BitcoinJobManager : BitcoinJobManagerBase<BitcoinJob>
         return job?.GetJobParams(isNew);
     }
 
+    public override BitcoinJob GetJobForStratum()
+    {
+        return currentJob;
+    }
+
     #region API-Surface
 
     public override void Configure(PoolConfig pc, ClusterConfig cc)
@@ -231,7 +225,7 @@ public class BitcoinJobManager : BitcoinJobManagerBase<BitcoinJob>
         extraPoolPaymentProcessingConfig = pc.PaymentProcessing?.Extra?.SafeExtensionDataAs<BitcoinPoolPaymentProcessingConfigExtra>();
 
         if(extraPoolConfig?.MaxActiveJobs.HasValue == true)
-            maxActiveJobs = extraPoolConfig.MaxActiveJobs.Value;
+            MaxActiveJobs = extraPoolConfig.MaxActiveJobs.Value;
 
         hasLegacyDaemon = extraPoolConfig?.HasLegacyDaemon == true;
 
@@ -281,9 +275,9 @@ public class BitcoinJobManager : BitcoinJobManagerBase<BitcoinJob>
 
         BitcoinJob job;
 
-        lock(jobLock)
+        lock(context)
         {
-            job = validJobs.FirstOrDefault(x => x.JobId == jobId);
+            job = context.GetJob(jobId);
         }
 
         if(job == null)
@@ -300,6 +294,7 @@ public class BitcoinJobManager : BitcoinJobManagerBase<BitcoinJob>
         share.UserAgent = context.UserAgent;
         share.Source = clusterConfig.ClusterName;
         share.Created = clock.Now;
+        share.MinerPass = context.MinerPass;
 
         // if block candidate, submit & check if accepted by network
         if(share.IsBlockCandidate)

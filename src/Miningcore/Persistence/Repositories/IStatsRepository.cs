@@ -14,7 +14,8 @@ public interface IStatsRepository
     Task<PoolStats[]> GetPoolPerformanceBetweenAsync(IDbConnection con, string poolId, SampleInterval interval, DateTime start, DateTime end, CancellationToken ct);
     Task<MinerStats> GetMinerStatsAsync(IDbConnection con, IDbTransaction tx, string poolId, string miner, CancellationToken ct);
     Task<MinerWorkerHashrate[]> GetPoolMinerWorkerHashratesAsync(IDbConnection con, string poolId, CancellationToken ct);
-    Task<MinerWorkerPerformanceStats[]> PagePoolMinersByHashrateAsync(IDbConnection con, string poolId, DateTime from, int page, int pageSize, CancellationToken ct);
+    Task<int> GetPoolWorkerCountAsync(IDbConnection con, string poolId, DateTime from, CancellationToken ct);
+    Task<int> GetMinerWorkerCountAsync(IDbConnection con, string poolId, string miner, DateTime from, CancellationToken ct);
 
     Task<WorkerPerformanceStatsContainer[]> GetMinerPerformanceBetweenMinutelyAsync(IDbConnection con, string poolId, string miner,
         DateTime start, DateTime end, CancellationToken ct);
@@ -27,4 +28,8 @@ public interface IStatsRepository
 
     Task<int> DeletePoolStatsBeforeAsync(IDbConnection con, DateTime date, CancellationToken ct);
     Task<int> DeleteMinerStatsBeforeAsync(IDbConnection con, DateTime date, CancellationToken ct);
+
+    Task<uint> GetMinerTotalConfirmedBlocksAsync(IDbConnection con, string poolId, string miner, CancellationToken ct);
+    Task<uint> GetMinerTotalPendingBlocksAsync(IDbConnection con, string poolId, string miner, CancellationToken ct);
+    Task<uint> GetMinerTotalOrphanedBlocksAsync(IDbConnection con, string poolId, string miner, CancellationToken ct);
 }

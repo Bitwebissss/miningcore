@@ -16,9 +16,14 @@ public interface IBlockRepository
     Task<Block> GetBlockBeforeAsync(IDbConnection con, string poolId, BlockStatus[] status, DateTime before);
     Task<uint> GetBlockBeforeCountAsync(IDbConnection con, string poolId, BlockStatus[] status, DateTime before);
     Task<uint> GetPoolBlockCountAsync(IDbConnection con, string poolId, CancellationToken ct);
+    Task<uint> GetPoolBlockCountSinceAsync(IDbConnection con, string poolId, DateTime since, CancellationToken ct);
     Task<uint> GetMinerBlockCountAsync(IDbConnection con, string poolId, string address, CancellationToken ct);
-    Task<DateTime?> GetLastPoolBlockTimeAsync(IDbConnection con, string poolId);
-    Task<DateTime?> GetLastMinerBlockTimeAsync(IDbConnection con, string poolId, string address);
+    Task<uint> GetTotalConfirmedBlocksAsync(IDbConnection con, string poolId, CancellationToken ct);
+    Task<uint> GetTotalPendingBlocksAsync(IDbConnection con, string poolId, CancellationToken ct);
+    Task<uint> GetTotalOrphanedBlocksAsync(IDbConnection con, string poolId, CancellationToken ct);
+    Task<decimal> GetLastBlockRewardAsync(IDbConnection con, string poolId, CancellationToken ct);
+    Task<DateTime?> GetLastPoolBlockTimeAsync(IDbConnection con, string poolId, CancellationToken ct);
+    Task<DateTime?> GetLastMinerBlockTimeAsync(IDbConnection con, string poolId, string address, CancellationToken ct);
     Task<Block> GetBlockByPoolHeightAndTypeAsync(IDbConnection con, string poolId, long height, string type);
     Task<uint> GetPoolDuplicateBlockCountByPoolHeightNoTypeAndStatusAsync(IDbConnection con, string poolId, long height, BlockStatus[] status);
     Task<uint> GetPoolDuplicateBlockBeforeCountByPoolHeightNoTypeAndStatusAsync(IDbConnection con, string poolId, long height, BlockStatus[] status, DateTime before);

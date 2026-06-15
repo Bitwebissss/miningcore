@@ -111,7 +111,7 @@ public class MessageBus : IMessageBus
     public bool IsRegistered(Type type, string contract = null)
     {
         var ret = false;
-        withMessageBus(type, contract, (mb, tuple) => { ret = mb.ContainsKey(tuple) && mb[tuple].IsAlive; });
+        withMessageBus(type, contract, (mb, tuple) => { ret = mb.TryGetValue(tuple, out var subj) && subj.IsAlive; });
 
         return ret;
     }
@@ -184,7 +184,7 @@ public class MessageBus : IMessageBus
         {
             var tuple = new Tuple<Type, string>(type, contract);
             block(messageBus, tuple);
-            if(messageBus.ContainsKey(tuple) && !messageBus[tuple].IsAlive)
+            if(messageBus.TryGetValue(tuple, out var existingSubj) && !existingSubj.IsAlive)
                 messageBus.Remove(tuple);
         }
     }

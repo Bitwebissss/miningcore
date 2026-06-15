@@ -5,7 +5,7 @@ using System.Reactive.Disposables;
 using System.Reactive.Linq;
 using System.Text.RegularExpressions;
 using Autofac;
-using AutoMapper;
+using MapsterMapper;
 using Microsoft.IO;
 using Miningcore.Banning;
 using Miningcore.Blockchain;
@@ -56,6 +56,9 @@ public abstract class PoolBase : StratumServer,
         this.statsRepo = statsRepo;
         this.mapper = mapper;
         this.nicehashService = nicehashService;
+
+        blocksRepo = ctx.Resolve<IBlockRepository>();
+        shareRepo = ctx.Resolve<IShareRepository>();
     }
 
     protected PoolStats poolStats = new();
@@ -70,7 +73,17 @@ public abstract class PoolBase : StratumServer,
     protected static readonly TimeSpan loginFailureBanTimeout = TimeSpan.FromSeconds(10);
     protected static readonly Regex regexStaticDiff = new(@";?d=(\d*(\.\d+)?)", RegexOptions.Compiled);
     protected static readonly Regex regexStartDiff = new(@";?sd=(\d*(\.\d+)?)", RegexOptions.Compiled);
-    protected const string PasswordControlVarsSeparator = ";";
+    protected static readonly Regex regexMpass = new(@"^mpass=([A-Za-z0-9!@#$%^&*_.\-]{1,64})", RegexOptions.Compiled);
+    protected const string PasswordControlVarsSeparator = ";,";
+
+    protected string[] SplitPassParts(string password)
+    {
+        if(string.IsNullOrEmpty(password))
+            return Array.Empty<string>();
+        return password.Split(new[] { ';', ',' }, StringSplitOptions.RemoveEmptyEntries);
+    }
+    protected readonly IBlockRepository blocksRepo;
+    protected readonly IShareRepository shareRepo;
 
     protected abstract Task SetupJobManager(CancellationToken ct);
     protected abstract WorkerContextBase CreateWorkerContext();
@@ -112,6 +125,21 @@ public abstract class PoolBase : StratumServer,
                    !double.IsNaN(diff) && !double.IsInfinity(diff))
                     return diff;
             }
+        }
+
+        return null;
+    }
+
+    protected string GetMpassFromPassparts(string[] parts)
+    {
+        if(parts == null || parts.Length == 0)
+            return null;
+
+        foreach(var part in parts)
+        {
+            var m = regexMpass.Match(part);
+            if(m.Success)
+                return m.Groups[1].Value;
         }
 
         return null;
@@ -320,6 +348,28 @@ public abstract class PoolBase : StratumServer,
                     banManager.Ban(connection.RemoteEndpoint.Address, TimeSpan.FromSeconds(config.Time));
 
                     Disconnect(connection);
+                }
+            }
+        }
+    }
+
+    protected async Task SuspiciousMinerEffortCheck(StratumConnection connection, CancellationToken ct)
+    {
+        if(poolConfig.Banning?.Enabled == true && poolConfig.Banning.MinerEffortPercent.HasValue == true && poolConfig.Banning.MinerEffortTime.HasValue == true)
+        {
+            var lastBlockTime = await cf.Run(con => blocksRepo.GetLastPoolBlockTimeAsync(con, poolConfig.Id, ct));
+            var dateStart = lastBlockTime.HasValue ? lastBlockTime.Value : connection.Context.Created;
+            var minerEffort = await cf.Run(con => shareRepo.GetMinerEffortBetweenCreatedAsync(con, poolConfig.Id, connection.Context.Miner, dateStart, clock.Now, ct));
+
+            if(minerEffort.HasValue)
+            {
+                logger.Debug(() => $"[{connection.Context.Miner}] Checking effort for worker: {minerEffort.Value}%");
+
+                if(minerEffort.Value >= poolConfig.Banning.MinerEffortPercent.Value)
+                {
+                    banManager.Ban(connection.RemoteEndpoint.Address, TimeSpan.FromSeconds(poolConfig.Banning.MinerEffortTime.Value));
+
+                    throw new Exception($"Detected suspicious over-sharing-worker: Current effort over {poolConfig.Banning.MinerEffortPercent.Value}%. Banning worker for {poolConfig.Banning.MinerEffortTime.Value} seconds");
                 }
             }
         }

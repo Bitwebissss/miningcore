@@ -1,9 +1,8 @@
 using System.Data;
 using System.Text;
-using AutoMapper;
+using MapsterMapper;
 using Dapper;
 using Miningcore.Persistence.Model;
-using Miningcore.Persistence.Model.Projections;
 using Miningcore.Persistence.Repositories;
 using Npgsql;
 using NpgsqlTypes;
@@ -71,29 +70,6 @@ public class PaymentRepository : IPaymentRepository
             .ToArray();
     }
 
-    public async Task<BalanceChange[]> PageBalanceChangesAsync(IDbConnection con, string poolId, string address, int page, int pageSize, CancellationToken ct)
-    {
-       const string query = @"SELECT * FROM balance_changes WHERE poolid = @poolid
-            AND address = @address
-            ORDER BY created DESC OFFSET @offset FETCH NEXT @pageSize ROWS ONLY";
-
-        return (await con.QueryAsync<Entities.BalanceChange>(new CommandDefinition(query,
-                new { poolId, address, offset = page * pageSize, pageSize }, cancellationToken: ct)))
-            .Select(mapper.Map<BalanceChange>)
-            .ToArray();
-    }
-
-    public async Task<AmountByDate[]> PageMinerPaymentsByDayAsync(IDbConnection con, string poolId, string address, int page, int pageSize, CancellationToken ct)
-    {
-       const string query = @"SELECT SUM(amount) AS amount, date_trunc('day', created) AS date FROM payments WHERE poolid = @poolid
-            AND address = @address
-            GROUP BY date
-            ORDER BY date DESC OFFSET @offset FETCH NEXT @pageSize ROWS ONLY";
-
-        return (await con.QueryAsync<AmountByDate>(new CommandDefinition(query, new { poolId, address, offset = page * pageSize, pageSize }, cancellationToken: ct)))
-            .ToArray();
-    }
-
     public Task<uint> GetPaymentsCountAsync(IDbConnection con, string poolId, string address, CancellationToken ct)
     {
         var query = new StringBuilder("SELECT COUNT(*) FROM payments WHERE poolid = @poolId");
@@ -104,24 +80,17 @@ public class PaymentRepository : IPaymentRepository
         return con.ExecuteScalarAsync<uint>(new CommandDefinition(query.ToString(), new { poolId, address }, cancellationToken: ct));
     }
 
-    public Task<uint> GetMinerPaymentsByDayCountAsync(IDbConnection con, string poolId, string address)
+    public Task<DateTime?> GetLastPoolPaymentTimeAsync(IDbConnection con, string poolId, CancellationToken ct)
     {
-        const string query =
-            @"SELECT COUNT(*) FROM (SELECT SUM(amount) AS amount, date_trunc('day', created) AS date FROM payments WHERE poolid = @poolid
-            AND address = @address
-            GROUP BY date
-            ORDER BY date DESC) s";
+        const string query = @"SELECT created FROM payments WHERE poolid = @poolId ORDER BY created DESC LIMIT 1";
 
-        return con.ExecuteScalarAsync<uint>(query, new { poolId, address });
+        return con.ExecuteScalarAsync<DateTime?>(new CommandDefinition(query, new { poolId }, cancellationToken: ct));
     }
 
-    public Task<uint> GetBalanceChangesCountAsync(IDbConnection con, string poolId, string address = null)
+    public Task<uint> GetTotalPoolPaymentsCountAsync(IDbConnection con, string poolId, CancellationToken ct)
     {
-        var query = new StringBuilder("SELECT COUNT(*) FROM balance_changes WHERE poolid = @poolId");
+        const string query = @"SELECT COUNT(*) FROM payments WHERE poolid = @poolId";
 
-        if(!string.IsNullOrEmpty(address))
-            query.Append(" AND address = @address ");
-
-        return con.ExecuteScalarAsync<uint>(query.ToString(), new { poolId, address });
+        return con.ExecuteScalarAsync<uint>(new CommandDefinition(query, new { poolId }, cancellationToken: ct));
     }
 }

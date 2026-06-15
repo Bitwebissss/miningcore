@@ -14,7 +14,8 @@ using Miningcore.Util;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using NLog;
-using ZeroMQ;
+using NetMQ;
+using NetMQ.Sockets;
 using Contract = Miningcore.Contracts.Contract;
 
 namespace Miningcore.Rpc;
@@ -121,7 +122,7 @@ public class RpcClient
             .RefCount();
     }
 
-    public IObservable<ZMessage> ZmqSubscribe(ILogger logger, CancellationToken ct, Dictionary<DaemonEndpointConfig, (string Socket, string Topic)> portMap)
+    public IObservable<NetMQMessage> ZmqSubscribe(ILogger logger, CancellationToken ct, Dictionary<DaemonEndpointConfig, (string Socket, string Topic)> portMap)
     {
         return portMap.Keys
             .Select(endPoint => ZmqSubscribeEndpoint(logger, ct, portMap[endPoint].Socket, portMap[endPoint].Topic))
@@ -334,31 +335,35 @@ public class RpcClient
         }));
     }
 
-    private static IObservable<ZMessage> ZmqSubscribeEndpoint(ILogger logger, CancellationToken ct, string url, string topic)
+    private static IObservable<NetMQMessage> ZmqSubscribeEndpoint(ILogger logger, CancellationToken ct, string url, string topic)
     {
-        return Observable.Defer(() => Observable.Create<ZMessage>(obs =>
+        return Observable.Defer(() => Observable.Create<NetMQMessage>(obs =>
         {
             var tcs = CancellationTokenSource.CreateLinkedTokenSource(ct);
 
             var thread = new Thread(() =>
             {
+                // Poll timeout: short enough to respond to cancellation promptly,
+                // long enough to avoid spinning the CPU.
+                var pollTimeout = TimeSpan.FromSeconds(1);
+
                 while(!tcs.IsCancellationRequested)
                 {
                     try
                     {
-                        using(var subSocket = new ZSocket(ZSocketType.SUB))
+                        using var subSocket = new SubscriberSocket();
+                        subSocket.Connect(url);
+                        subSocket.Subscribe(topic);
+
+                        logger.Debug($"Subscribed to {url}/{topic}");
+
+                        while(!tcs.IsCancellationRequested)
                         {
-                            //subSocket.Options.ReceiveHighWatermark = 1000;
-                            subSocket.Connect(url);
-                            subSocket.Subscribe(topic);
-
-                            logger.Debug($"Subscribed to {url}/{topic}");
-
-                            while(!tcs.IsCancellationRequested)
-                            {
-                                var msg = subSocket.ReceiveMessage();
+                            // TryReceive with timeout: avoids blocking indefinitely so
+                            // cancellation is honoured within ~pollTimeout.
+                            var msg = new NetMQMessage();
+                            if(subSocket.TryReceiveMultipartMessage(pollTimeout, ref msg))
                                 obs.OnNext(msg);
-                            }
                         }
                     }
 
@@ -366,12 +371,14 @@ public class RpcClient
                     {
                         logger.Error(ex);
 
-                        // do not run wild in case of a persistent error condition
-                        Thread.Sleep(1000);
+                        // Back off before reconnecting to avoid tight error loops.
+                        if(!tcs.IsCancellationRequested)
+                            Thread.Sleep(1000);
                     }
                 }
             });
 
+            thread.IsBackground = true;
             thread.Start();
 
             return Disposable.Create(() =>

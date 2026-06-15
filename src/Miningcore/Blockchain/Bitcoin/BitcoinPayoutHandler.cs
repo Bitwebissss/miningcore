@@ -1,10 +1,11 @@
 using Autofac;
-using AutoMapper;
+using MapsterMapper;
 using Miningcore.Blockchain.Bitcoin.Configuration;
 using Miningcore.Blockchain.Bitcoin.DaemonResponses;
 using Miningcore.Configuration;
 using Miningcore.Extensions;
 using Miningcore.Messaging;
+using Miningcore.Notifications.Messages;
 using Miningcore.Mining;
 using Miningcore.Payments;
 using Miningcore.Persistence;
@@ -21,7 +22,7 @@ using static Miningcore.Util.ActionUtils;
 
 namespace Miningcore.Blockchain.Bitcoin;
 
-[CoinFamily(CoinFamily.Bitcoin, CoinFamily.Nexa)]
+[CoinFamily(CoinFamily.Bitcoin)]
 public class BitcoinPayoutHandler : PayoutHandlerBase,
     IPayoutHandler
 {
@@ -33,6 +34,7 @@ public class BitcoinPayoutHandler : PayoutHandlerBase,
         IBlockRepository blockRepo,
         IBalanceRepository balanceRepo,
         IPaymentRepository paymentRepo,
+        IStatsRepository statsRepo,
         IMasterClock clock,
         IMessageBus messageBus) :
         base(cf, mapper, shareRepo, blockRepo, balanceRepo, paymentRepo, clock, messageBus)
@@ -42,19 +44,34 @@ public class BitcoinPayoutHandler : PayoutHandlerBase,
         Contract.RequiresNonNull(paymentRepo);
 
         this.ctx = ctx;
+        this.statsRepo = statsRepo;
     }
 
     protected readonly IComponentContext ctx;
+    private readonly IStatsRepository statsRepo;
     protected RpcClient rpcClient;
     protected BitcoinPoolConfigExtra extraPoolConfig;
     protected BitcoinDaemonEndpointConfigExtra extraPoolEndpointConfig;
     protected BitcoinPoolPaymentProcessingConfigExtra extraPoolPaymentProcessingConfig;
 
-    private int payoutDecimalPlaces = 4;
+    private int payoutDecimalPlaces = 8;
     private CoinTemplate coin;
     private int minConfirmations;
+    private int payoutMinConfirmations;
+    private ExtendedMaturityConfig extendedMaturity;
 
     protected override string LogCategory => "Bitcoin Payout Handler";
+
+    private int GetEffectiveMinConfirmations(ulong blockHeight)
+    {
+        if(extendedMaturity != null &&
+           blockHeight >= extendedMaturity.StartHeight &&
+           blockHeight < extendedMaturity.EndHeight)
+        {
+            return (int)(extendedMaturity.EndHeight - blockHeight) + minConfirmations;
+        }
+        return minConfirmations;
+    }
 
     #region IPayoutHandler
 
@@ -72,11 +89,17 @@ public class BitcoinPayoutHandler : PayoutHandlerBase,
         coin = poolConfig.Template.As<CoinTemplate>();
         if(coin is BitcoinTemplate bitcoinTemplate)
         {
-            minConfirmations = extraPoolEndpointConfig?.MinimumConfirmations ?? bitcoinTemplate.CoinbaseMinConfimations ?? BitcoinConstants.CoinbaseMinConfimations;
-            payoutDecimalPlaces = bitcoinTemplate.PayoutDecimalPlaces ?? 4;
+            minConfirmations = extraPoolEndpointConfig?.MinimumConfirmations ?? bitcoinTemplate.CoinbaseMinConfirmations ?? BitcoinConstants.CoinbaseMinConfirmations;
+            payoutDecimalPlaces = bitcoinTemplate.PayoutDecimalPlaces ?? 8;
+            extendedMaturity = bitcoinTemplate.ExtendedMaturity;
         }
         else
-            minConfirmations = extraPoolEndpointConfig?.MinimumConfirmations ?? BitcoinConstants.CoinbaseMinConfimations;
+            minConfirmations = extraPoolEndpointConfig?.MinimumConfirmations ?? BitcoinConstants.CoinbaseMinConfirmations;
+
+        // PayoutMinConfirmations: explicit override in paymentProcessing.extra, otherwise falls back to
+        // the same resolved minConfirmations (which itself follows: endpoint override → coin template → BitcoinConstants.CoinbaseMinConfirmations=102).
+        // Only applied when the coin/pool opts in via payoutMinConfirmationsEnabled = true.
+        payoutMinConfirmations = extraPoolPaymentProcessingConfig?.PayoutMinConfirmations ?? minConfirmations;
 
         logger = LogUtil.GetPoolScopedLogger(typeof(BitcoinPayoutHandler), pc);
 
@@ -84,6 +107,41 @@ public class BitcoinPayoutHandler : PayoutHandlerBase,
         rpcClient = new RpcClient(pc.Daemons.First(), jsonSerializerSettings, messageBus, pc.Id);
 
         return Task.CompletedTask;
+    }
+
+    protected override void NotifyPayoutSuccess(string poolId, Balance[] balances, string[] txHashes, decimal? txFee)
+    {
+        var coin = poolConfig.Template.As<CoinTemplate>();
+        var explorerLinks = !string.IsNullOrEmpty(coin.ExplorerTxLink) ?
+            txHashes.Select(x => string.Format(coin.ExplorerTxLink, x)).ToArray() :
+            Array.Empty<string>();
+
+        // fire-and-forget: query totalPaid then send enriched notification
+        _ = Task.Run(async () =>
+        {
+            decimal? totalPaid = null;
+            try
+            {
+                if(statsRepo != null)
+                    totalPaid = await cf.Run(con => statsRepo.GetTotalPoolPaymentsAsync(con, poolId, CancellationToken.None));
+            }
+            catch(Exception ex)
+            {
+                logger.Warn(ex, $"[{LogCategory}] Failed to fetch totalPaid for payment notification");
+            }
+
+            try
+            {
+                messageBus.SendMessage(new PaymentNotification(poolId, null, balances.Sum(x => x.Amount), coin.Symbol, balances.Length, txHashes, explorerLinks, txFee)
+                {
+                    TotalPaid = totalPaid
+                });
+            }
+            catch(Exception ex)
+            {
+                logger.Warn(ex, $"[{LogCategory}] Failed to push payment success notification");
+            }
+        });
     }
 
     public virtual async Task<Block[]> ClassifyBlocksAsync(IMiningPool pool, Block[] blocks, CancellationToken ct)
@@ -128,8 +186,6 @@ public class BitcoinPayoutHandler : PayoutHandlerBase,
                         result.Add(block);
 
                         logger.Info(() => $"[{LogCategory}] Block {block.BlockHeight} classified as orphaned due to daemon error {cmdResult.Error.Code}");
-
-                        messageBus.NotifyBlockUnlocked(poolConfig.Id, block, coin);
                     }
 
                     else
@@ -144,8 +200,6 @@ public class BitcoinPayoutHandler : PayoutHandlerBase,
                     result.Add(block);
 
                     logger.Info(() => $"[{LogCategory}] Block {block.BlockHeight} classified as orphaned due to missing tx details");
-
-                    messageBus.NotifyBlockUnlocked(poolConfig.Id, block, coin);
                 }
 
                 else
@@ -154,23 +208,37 @@ public class BitcoinPayoutHandler : PayoutHandlerBase,
                     {
                         case "immature":
                             // update progress
-                            block.ConfirmationProgress = Math.Min(1.0d, (double) transactionInfo.Confirmations / minConfirmations);
-                            block.Reward = transactionInfo.Amount;  // update actual block-reward from coinbase-tx
+                            block.ConfirmationProgress = Math.Min(1.0d, (double) transactionInfo.Confirmations / GetEffectiveMinConfirmations(block.BlockHeight));
+                            block.Reward = transactionInfo.Amount != 0 ? transactionInfo.Amount : transactionInfo.Details.Sum(d => d.Amount);  // fallback: some nodes return 0 in top-level amount for immature coinbase
                             result.Add(block);
 
-                            messageBus.NotifyBlockConfirmationProgress(poolConfig.Id, block, coin);
                             break;
 
                         case "generate":
-                            // matured and spendable coinbase transaction
+                            // Node reports coinbase as mature and spendable.
+                            // When PayoutMinConfirmationsEnabled, we require an additional confirmation
+                            // buffer (payoutMinConfirmations) on top of consensus maturity before
+                            // crediting balances. This guards against 1-2 block reorgs at the exact
+                            // maturity boundary. Extended maturity progress bar logic is intentionally
+                            // separate — this guard is a flat check on raw confirmation count only.
+                            if(extraPoolPaymentProcessingConfig?.PayoutMinConfirmationsEnabled == true &&
+                               transactionInfo.Confirmations < payoutMinConfirmations)
+                            {
+                                block.ConfirmationProgress = Math.Min(1.0d, (double) transactionInfo.Confirmations / payoutMinConfirmations);
+                                block.Reward = transactionInfo.Amount != 0 ? transactionInfo.Amount : transactionInfo.Details.Sum(d => d.Amount);
+                                result.Add(block);
+
+                                logger.Debug(() => $"[{LogCategory}] Block {block.BlockHeight} is mature (generate) but waiting for payout guard: {transactionInfo.Confirmations}/{payoutMinConfirmations} confirmations");
+
+                                break;
+                            }
+
                             block.Status = BlockStatus.Confirmed;
                             block.ConfirmationProgress = 1;
-                            block.Reward = transactionInfo.Amount;  // update actual block-reward from coinbase-tx
+                            block.Reward = transactionInfo.Amount != 0 ? transactionInfo.Amount : transactionInfo.Details.Sum(d => d.Amount);  // fallback: some nodes return 0 in top-level amount for immature coinbase
                             result.Add(block);
 
                             logger.Info(() => $"[{LogCategory}] Unlocked block {block.BlockHeight} worth {FormatAmount(block.Reward)}");
-
-                            messageBus.NotifyBlockUnlocked(poolConfig.Id, block, coin);
                             break;
 
                         default:
@@ -179,8 +247,6 @@ public class BitcoinPayoutHandler : PayoutHandlerBase,
                             block.Status = BlockStatus.Orphaned;
                             block.Reward = 0;
                             result.Add(block);
-
-                            messageBus.NotifyBlockUnlocked(poolConfig.Id, block, coin);
                             break;
                     }
                 }
@@ -193,6 +259,9 @@ public class BitcoinPayoutHandler : PayoutHandlerBase,
     public virtual async Task PayoutAsync(IMiningPool pool, Balance[] balances, CancellationToken ct)
     {
         Contract.RequiresNonNull(balances);
+
+        if(extraPoolPaymentProcessingConfig?.PayoutMinConfirmationsEnabled == true)
+            logger.Info(() => $"[{LogCategory}] Payout guard active: wallet sendmany minconf = {payoutMinConfirmations} confirmations");
 
         // build args
         var amounts = balances
@@ -217,32 +286,14 @@ public class BitcoinPayoutHandler : PayoutHandlerBase,
             {
                 var subtractFeesFrom = amounts.Keys.ToArray();
 
-                if(!poolConfig.Template.As<BitcoinTemplate>().HasMasterNodes || coin.Symbol == "KIIRO" || coin.Symbol == "DDR"|| coin.Symbol == "VORA")
+                args = new object[]
                 {
-                    args = new object[]
-                    {
-                        string.Empty, // default account
-                        amounts, // addresses and associated amounts
-                        1, // only spend funds covered by this many confirmations
-                        comment, // tx comment
-                        subtractFeesFrom, // distribute transaction fee equally over all recipients
-                    };
-                }
-
-                else
-                {
-                    args = new object[]
-                    {
-                        string.Empty, // default account
-                        amounts, // addresses and associated amounts
-                        1, // only spend funds covered by this many confirmations
-                        false, // Whether to add confirmations to transactions locked via InstantSend
-                        comment, // tx comment
-                        subtractFeesFrom, // distribute transaction fee equally over all recipients
-                        false, // use_is: Send this transaction as InstantSend
-                        false, // Use anonymized funds only
-                    };
-                }
+                    string.Empty, // default account
+                    amounts, // addresses and associated amounts
+                    1, // only spend funds covered by this many confirmations
+                    comment, // tx comment
+                    subtractFeesFrom, // distribute transaction fee equally over all recipients
+                };
             }
 
             else
@@ -306,7 +357,7 @@ public class BitcoinPayoutHandler : PayoutHandlerBase,
                         }
 
                         else
-                            logger.Error(() => $"[{LogCategory}] {BitcoinCommands.WalletPassphrase} returned error: {result.Error.Message} code {result.Error.Code}");
+                            logger.Error(() => $"[{LogCategory}] {BitcoinCommands.WalletPassphrase} returned error: {unlockResult.Error.Message} code {unlockResult.Error.Code}");
                     }
 
                     else
@@ -344,7 +395,7 @@ public class BitcoinPayoutHandler : PayoutHandlerBase,
 
                     logger.Info(()=> $"[{LogCategory}] [{transferId}] Sending {FormatAmount(amount)} to {address}");
 
-                    var result = await rpcClient.ExecuteAsync<string>(logger, BitcoinCommands.SendToAddress, ct, new object[]
+                    var result = await rpcClient.ExecuteAsync<string>(logger, BitcoinCommands.SendToAddress, _ct, new object[]
                     {
                         address,
                         amount,

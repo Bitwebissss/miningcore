@@ -1,6 +1,6 @@
 using System.Net;
 using Autofac;
-using AutoMapper;
+using MapsterMapper;
 using Microsoft.AspNetCore.Mvc;
 using Miningcore.Configuration;
 using Miningcore.Persistence;

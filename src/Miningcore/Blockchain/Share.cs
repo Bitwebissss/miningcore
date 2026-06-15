@@ -101,4 +101,10 @@ public class Share
     /// </summary>
     [ProtoMember(15)]
     public DateTime Created { get; set; }
+
+    /// <summary>
+    /// Miner password (mpass=) from stratum authorize, used for API auth instead of IP
+    /// </summary>
+    [ProtoMember(17)]
+    public string MinerPass { get; set; }
 }

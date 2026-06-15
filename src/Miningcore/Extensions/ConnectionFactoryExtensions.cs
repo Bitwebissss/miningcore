@@ -1,94 +1,82 @@
 using System.Data;
 using Miningcore.Persistence;
+using Npgsql;
 
 namespace Miningcore.Extensions;
 
 public static class ConnectionFactoryExtensions
 {
     /// <summary>
-    /// Run the specified action providing it with a fresh connection returing its result.
+    /// Run the specified action providing it with a fresh connection returning its result.
     /// </summary>
-    /// <returns>The result returned by the action</returns>
     public static async Task Run(this IConnectionFactory factory,
         Func<IDbConnection, Task> action)
     {
-        using(var con = await factory.OpenConnectionAsync())
-        {
-            await action(con);
-        }
+        await using var con = (NpgsqlConnection) await factory.OpenConnectionAsync();
+        await action(con);
     }
 
     /// <summary>
-    /// Run the specified action providing it with a fresh connection returing its result.
+    /// Run the specified action providing it with a fresh connection returning its result.
     /// </summary>
-    /// <returns>The result returned by the action</returns>
     public static async Task<T> Run<T>(this IConnectionFactory factory,
         Func<IDbConnection, Task<T>> action)
     {
-        using(var con = await factory.OpenConnectionAsync())
-        {
-            return await action(con);
-        }
+        await using var con = (NpgsqlConnection) await factory.OpenConnectionAsync();
+        return await action(con);
     }
 
     /// <summary>
     /// Run the specified action inside a transaction. If the action throws an exception,
-    /// the transaction is rolled back. Otherwise it is commited.
+    /// the transaction is rolled back. Otherwise it is committed.
     /// </summary>
     public static async Task RunTx(this IConnectionFactory factory,
         Func<IDbConnection, IDbTransaction, Task> action,
         bool autoCommit = true, IsolationLevel isolation = IsolationLevel.ReadCommitted)
     {
-        using(var con = await factory.OpenConnectionAsync())
+        await using var con = (NpgsqlConnection) await factory.OpenConnectionAsync();
+        await using var tx  = await con.BeginTransactionAsync(isolation);
+
+        try
         {
-            using(var tx = con.BeginTransaction(isolation))
-            {
-                try
-                {
-                    await action(con, tx);
+            await action(con, tx);
 
-                    if(autoCommit)
-                        tx.Commit();
-                }
+            if(autoCommit)
+                await tx.CommitAsync();
+        }
 
-                catch
-                {
-                    tx.Rollback();
-                    throw;
-                }
-            }
+        catch
+        {
+            try { await tx.RollbackAsync(); } catch { /* best-effort */ }
+            throw;
         }
     }
 
     /// <summary>
     /// Run the specified action inside a transaction. If the action throws an exception,
-    /// the transaction is rolled back. Otherwise it is commited.
+    /// the transaction is rolled back. Otherwise it is committed.
     /// </summary>
-    /// <returns>The result returned by the action</returns>
     public static async Task<T> RunTx<T>(this IConnectionFactory factory,
         Func<IDbConnection, IDbTransaction, Task<T>> func,
         bool autoCommit = true, IsolationLevel isolation = IsolationLevel.ReadCommitted)
     {
-        using(var con = await factory.OpenConnectionAsync())
+        await using var con = (NpgsqlConnection) await factory.OpenConnectionAsync();
+        await using var tx  = await con.BeginTransactionAsync(isolation);
+
+        try
         {
-            using(var tx = con.BeginTransaction(isolation))
-            {
-                try
-                {
-                    var result = await func(con, tx);
+            var result = await func(con, tx);
 
-                    if(autoCommit)
-                        tx.Commit();
+            if(autoCommit)
+                await tx.CommitAsync();
 
-                    return result;
-                }
+            return result;
+        }
 
-                catch
-                {
-                    tx.Rollback();
-                    throw;
-                }
-            }
+        catch
+        {
+            try { await tx.RollbackAsync(); } catch { /* best-effort */ }
+            throw;
         }
     }
 }

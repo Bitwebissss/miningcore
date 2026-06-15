@@ -109,31 +109,41 @@ public abstract class StratumServer
     {
         var cert = GetTlsCert(port);
 
-        while(!ct.IsCancellationRequested)
+        try
         {
-            try
+            while(!ct.IsCancellationRequested)
             {
-                var socket = await server.AcceptAsync(ct);
+                try
+                {
+                    var socket = await server.AcceptAsync(ct);
 
-                AcceptConnection(socket, port, cert, ct);
-            }
+                    AcceptConnection(socket, port, cert, ct);
+                }
 
-            catch(OperationCanceledException)
-            {
-                // ignored
-                break;
-            }
+                catch(OperationCanceledException)
+                {
+                    // ignored
+                    break;
+                }
 
-            catch(ObjectDisposedException)
-            {
-                // ignored
-                break;
-            }
+                catch(ObjectDisposedException)
+                {
+                    // ignored
+                    break;
+                }
 
-            catch(Exception ex)
-            {
-                logger.Error(ex);
+                catch(Exception ex)
+                {
+                    logger.Error(ex);
+                }
             }
+        }
+
+        finally
+        {
+            // Always release the OS listening socket handle when the loop exits,
+            // whether by cancellation, exception, or normal termination.
+            server.Dispose();
         }
     }
 
@@ -299,7 +309,7 @@ public abstract class StratumServer
 
         if(!certs.TryGetValue(port.PoolEndpoint.TlsPfxFile, out var cert))
         {
-            cert = Guard(()=> new X509Certificate2(port.PoolEndpoint.TlsPfxFile, port.PoolEndpoint.TlsPfxPassword), ex =>
+            cert = Guard(()=> X509CertificateLoader.LoadPkcs12FromFile(port.PoolEndpoint.TlsPfxFile, port.PoolEndpoint.TlsPfxPassword), ex =>
             {
                 logger.Info(() => $"Failed to load TLS certificate {port.PoolEndpoint.TlsPfxFile}: {ex.Message}");
                 throw ex;

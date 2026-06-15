@@ -43,7 +43,7 @@ public class NicehashService
                 return response.Algorithms.ToDictionary(x => x.Algorithm, x=> x, StringComparer.InvariantCultureIgnoreCase);
             });
 
-            var niceHashAlgo = GetNicehashAlgo(coin, algo);
+            var niceHashAlgo = GetNicehashAlgo(algo);
 
             if(!algos.TryGetValue(niceHashAlgo, out var item))
                 return (double?) null;
@@ -52,14 +52,5 @@ public class NicehashService
         }, ex=> logger.Error(()=> $"Error updating Nicehash diffs: {ex.Message}"));
     }
 
-    private string GetNicehashAlgo(string coin, string algo)
-    {
-        if(coin == "Beam" && algo == "BeamHash")
-            return "beamv3";
-
-        if(coin == "Monero" && algo == "RandomX")
-            return "randomxmonero";
-
-        return algo;
-    }
+    private static string GetNicehashAlgo(string algo) => algo;
 }

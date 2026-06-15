@@ -146,7 +146,7 @@ public class SimpleRestClient
         IEnumerable<KeyValuePair<string, string>> headers = null)
     {
         var requestUri = BuildRequestUri(path, PrepareQueryParams(queryParams));
-        var request = new HttpRequestMessage(HttpMethod.Get, requestUri);
+        using var request = new HttpRequestMessage(HttpMethod.Get, requestUri);
 
         PrepareRequest(request, headers);
 
@@ -167,7 +167,7 @@ public class SimpleRestClient
 
         var requestUri = BuildRequestUri(path, PrepareQueryParams(queryParams));
 
-        var request = new HttpRequestMessage(HttpMethod.Post, requestUri)
+        using var request = new HttpRequestMessage(HttpMethod.Post, requestUri)
         {
             Content = GetJsonContent(data)
         };
@@ -185,7 +185,7 @@ public class SimpleRestClient
 
         var requestUri = BuildRequestUri(path, PrepareQueryParams(queryParams));
 
-        var request = new HttpRequestMessage(HttpMethod.Post, requestUri)
+        using var request = new HttpRequestMessage(HttpMethod.Post, requestUri)
         {
             Content = GetJsonContent(data)
         };
@@ -209,7 +209,7 @@ public class SimpleRestClient
 
         var requestUri = BuildRequestUri(path, PrepareQueryParams(queryParams));
 
-        var request = new HttpRequestMessage(HttpMethod.Post, requestUri)
+        using var request = new HttpRequestMessage(HttpMethod.Post, requestUri)
         {
             Content = GetJsonContent(data)
         };
@@ -229,7 +229,7 @@ public class SimpleRestClient
         Contract.Requires<ArgumentException>(!string.IsNullOrEmpty(path));
 
         var requestUri = BuildRequestUri(path, PrepareQueryParams(queryParams));
-        var request = new HttpRequestMessage(HttpMethod.Delete, requestUri);
+        using var request = new HttpRequestMessage(HttpMethod.Delete, requestUri);
 
         PrepareRequest(request, headers);
 
@@ -243,7 +243,7 @@ public class SimpleRestClient
         Contract.Requires<ArgumentException>(!string.IsNullOrEmpty(path));
 
         var requestUri = BuildRequestUri(path, PrepareQueryParams(queryParams));
-        var request = new HttpRequestMessage(HttpMethod.Delete, requestUri);
+        using var request = new HttpRequestMessage(HttpMethod.Delete, requestUri);
 
         PrepareRequest(request, headers);
 
@@ -263,7 +263,7 @@ public class SimpleRestClient
         Contract.Requires<ArgumentException>(!string.IsNullOrEmpty(path));
 
         var requestUri = BuildRequestUri(path, PrepareQueryParams(queryParams));
-        var request = new HttpRequestMessage(HttpMethod.Delete, requestUri);
+        using var request = new HttpRequestMessage(HttpMethod.Delete, requestUri);
 
         PrepareRequest(request, headers);
 

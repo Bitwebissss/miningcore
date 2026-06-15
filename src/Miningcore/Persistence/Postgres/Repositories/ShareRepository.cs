@@ -1,5 +1,5 @@
 using System.Data;
-using AutoMapper;
+using MapsterMapper;
 using Dapper;
 using Miningcore.Persistence.Model;
 using Miningcore.Persistence.Model.Projections;
@@ -26,7 +26,7 @@ public class ShareRepository : IShareRepository
         var pgCon = (NpgsqlConnection) con;
 
         const string query = @"COPY shares (poolid, blockheight, difficulty,
-            networkdifficulty, miner, worker, useragent, ipaddress, source, created) FROM STDIN (FORMAT BINARY)";
+            networkdifficulty, miner, worker, useragent, ipaddress, source, created, mpassword) FROM STDIN (FORMAT BINARY)";
 
         await using(var writer = await pgCon.BeginBinaryImportAsync(query, ct))
         {
@@ -44,6 +44,11 @@ public class ShareRepository : IShareRepository
                 await writer.WriteAsync(share.IpAddress, ct);
                 await writer.WriteAsync(share.Source, ct);
                 await writer.WriteAsync(share.Created, NpgsqlDbType.TimestampTz, ct);
+
+                if(share.MinerPass != null)
+                    await writer.WriteAsync(share.MinerPass, ct);
+                else
+                    await writer.WriteNullAsync(ct);
             }
 
             await writer.CompleteAsync(ct);
@@ -75,18 +80,24 @@ public class ShareRepository : IShareRepository
         return con.QuerySingleAsync<long>(new CommandDefinition(query, new { poolId, miner}, tx, cancellationToken: ct));
     }
 
-    public Task<double?> GetEffortBetweenCreatedAsync(IDbConnection con, string poolId, DateTime start, DateTime end)
+    public Task<double?> GetEffortBetweenCreatedAsync(IDbConnection con, string poolId, double shareConst, DateTime start, DateTime end, CancellationToken ct)
     {
+        // NOTE: shareConst is intentionally NOT multiplied into the query.
+        // share.Difficulty is stored as (stratumDiff / shareMultiplier) and
+        // share.NetworkDifficulty is stored as (diff1 / networkTarget), so their
+        // ratio already equals the fractional block-work contributed by the share.
+        // Multiplying by shareConst (= shareMultiplier) would inflate the result
+        // by exactly shareMultiplier (e.g. 65536×) — that was the original bug.
         const string query = "SELECT SUM(difficulty / networkdifficulty) FROM shares WHERE poolid = @poolId AND created > @start AND created < @end";
 
-        return con.QuerySingleAsync<double?>(query, new { poolId, start, end });
+        return con.QuerySingleAsync<double?>(new CommandDefinition(query, new { poolId, start, end }, cancellationToken: ct));
     }
 
-    public Task<double?> GetMinerEffortBetweenCreatedAsync(IDbConnection con, string poolId, string miner, DateTime start, DateTime end)
+    public Task<double?> GetMinerEffortBetweenCreatedAsync(IDbConnection con, string poolId, string miner, DateTime start, DateTime end, CancellationToken ct)
     {
         const string query = "SELECT SUM(difficulty / networkdifficulty) FROM shares WHERE poolid = @poolId AND miner = @miner AND created > @start AND created < @end";
 
-        return con.QuerySingleAsync<double?>(query, new { poolId, miner, start, end });
+        return con.QuerySingleAsync<double?>(new CommandDefinition(query, new { poolId, miner, start, end }, cancellationToken: ct));
     }
 
     public async Task DeleteSharesByMinerAsync(IDbConnection con, IDbTransaction tx, string poolId, string miner, CancellationToken ct)
@@ -153,6 +164,15 @@ public class ShareRepository : IShareRepository
     {
         const string query = @"SELECT DISTINCT s.ipaddress FROM (SELECT * FROM shares
             WHERE poolid = @poolId and miner = @miner ORDER BY CREATED DESC LIMIT 100) s";
+
+        return (await con.QueryAsync<string>(new CommandDefinition(query, new { poolId, miner }, tx, cancellationToken: ct)))
+            .ToArray();
+    }
+
+    public async Task<string[]> GetRecentlyUsedPasswordsAsync(IDbConnection con, IDbTransaction tx, string poolId, string miner, CancellationToken ct)
+    {
+        const string query = @"SELECT DISTINCT s.mpassword FROM (SELECT * FROM shares
+            WHERE poolid = @poolId AND miner = @miner AND mpassword IS NOT NULL ORDER BY created DESC LIMIT 100) s";
 
         return (await con.QueryAsync<string>(new CommandDefinition(query, new { poolId, miner }, tx, cancellationToken: ct)))
             .ToArray();

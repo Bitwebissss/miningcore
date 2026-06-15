@@ -3,21 +3,19 @@ using System.Reactive.Disposables;
 using System.Text;
 using Microsoft.Extensions.Hosting;
 using Miningcore.Blockchain.Bitcoin.Configuration;
-using Miningcore.Blockchain.Cryptonote.Configuration;
 using Miningcore.Configuration;
 using Miningcore.Contracts;
 using Miningcore.Extensions;
 using Miningcore.Messaging;
 using Miningcore.Notifications.Messages;
 using Miningcore.Time;
+using NetMQ;
+using NetMQ.Sockets;
 using NLog;
-using ZeroMQ;
 
 namespace Miningcore.Mining;
 
-/// <summary>
-/// Receives ready made block templates from GBTRelay
-/// </summary>
+/// <summary>Receives ready-made block templates from GBTRelay.</summary>
 public class BtStreamReceiver : BackgroundService
 {
     public BtStreamReceiver(
@@ -38,64 +36,52 @@ public class BtStreamReceiver : BackgroundService
     private readonly IMessageBus messageBus;
     private readonly ClusterConfig clusterConfig;
 
-    private static ZSocket SetupSubSocket(ZmqPubSubEndpointConfig relay, bool silent = false)
+    private static SubscriberSocket SetupSubSocket(ZmqPubSubEndpointConfig relay, bool silent = false)
     {
-        var subSocket = new ZSocket(ZSocketType.SUB);
+        var sub = new SubscriberSocket();
 
         if(!string.IsNullOrEmpty(relay.SharedEncryptionKey))
-            subSocket.SetupCurveTlsClient(relay.SharedEncryptionKey, logger);
+            sub.SetupCurveTlsClient(relay.SharedEncryptionKey, logger);
 
-        subSocket.Connect(relay.Url);
-        subSocket.SubscribeAll();
+        sub.Connect(relay.Url);
+        sub.SubscribeToAnyTopic();
 
         if(!silent)
         {
-            if(subSocket.CurveServerKey != null && subSocket.CurveServerKey.Any(x => x != 0))
-                logger.Info($"Monitoring Bt-Stream source {relay.Url} using key {subSocket.CurveServerKey.ToHexString()}");
+            if(sub.Options.CurveServerKey != null && sub.Options.CurveServerKey.Any(x => x != 0))
+                logger.Info($"Monitoring Bt-Stream source {relay.Url} using key {sub.Options.CurveServerKey.ToHexString()}");
             else
                 logger.Info($"Monitoring Bt-Stream source {relay.Url}");
         }
 
-        return subSocket;
+        return sub;
     }
 
-    private void ProcessMessage(ZMessage msg)
+    private void ProcessMessage(NetMQMessage msg)
     {
-        // extract frames
-        var topic = msg[0].ToString(Encoding.UTF8);
-        var flags = msg[1].ReadUInt32();
-        var data = msg[2].Read();
-        var sent = DateTimeOffset.FromUnixTimeMilliseconds(msg[3].ReadInt64()).DateTime;
+        var topic = msg[0].ConvertToString(Encoding.UTF8);
+        var flags = BitConverter.ToUInt32(msg[1].ToByteArray(), 0);
+        var data  = msg[2].ToByteArray();
+        var sent  = DateTimeOffset.FromUnixTimeMilliseconds(
+            BitConverter.ToInt64(msg[3].ToByteArray(), 0)).DateTime;
 
-        // compressed
         if((flags & 1) == 1)
         {
-            using(var stm = new MemoryStream(data))
-            {
-                using(var stmOut = new MemoryStream())
-                {
-                    using(var ds = new DeflateStream(stm, CompressionMode.Decompress))
-                    {
-                        ds.CopyTo(stmOut);
-                    }
-
-                    data = stmOut.ToArray();
-                }
-            }
+            using var stm    = new MemoryStream(data);
+            using var stmOut = new MemoryStream();
+            using var ds     = new DeflateStream(stm, CompressionMode.Decompress);
+            ds.CopyTo(stmOut);
+            data = stmOut.ToArray();
         }
 
-        // convert
         var content = Encoding.UTF8.GetString(data);
-
-        // publish
         messageBus.SendMessage(new BtStreamMessage(topic, content, sent, DateTime.UtcNow));
     }
 
     protected override async Task ExecuteAsync(CancellationToken ct)
     {
-        var endpoints = clusterConfig.Pools.Select(x =>
-                x.Extra.SafeExtensionDataAs<BitcoinPoolConfigExtra>()?.BtStream ??
-                x.Extra.SafeExtensionDataAs<CryptonotePoolConfigExtra>()?.BtStream)
+        var endpoints = clusterConfig.Pools
+            .Select(x => x.Extra.SafeExtensionDataAs<BitcoinPoolConfigExtra>()?.BtStream)
             .Where(x => x != null)
             .DistinctBy(x => $"{x.Url}:{x.SharedEncryptionKey}")
             .ToArray();
@@ -103,98 +89,49 @@ public class BtStreamReceiver : BackgroundService
         if(!endpoints.Any())
             return;
 
-        await Task.Run(() =>
+        var reconnectTimeout = TimeSpan.FromSeconds(300);
+        var receiveTimeout   = TimeSpan.FromMilliseconds(5000);
+
+        logger.Info(() => "Online");
+
+        var tasks = endpoints.Select(relay => Task.Run(() =>
         {
-            var timeout = TimeSpan.FromMilliseconds(5000);
-            var reconnectTimeout = TimeSpan.FromSeconds(300);
-
-            var relays = endpoints
-                .DistinctBy(x => $"{x.Url}:{x.SharedEncryptionKey}")
-                .ToArray();
-
-            logger.Info(() => "Online");
-
             while(!ct.IsCancellationRequested)
             {
-                // track last message received per endpoint
-                var lastMessageReceived = relays.Select(_ => clock.Now).ToArray();
+                var lastReceived = clock.Now;
 
                 try
                 {
-                    // setup sockets
-                    var sockets = relays.Select(x=> SetupSubSocket(x)).ToArray();
+                    using var sub = SetupSubSocket(relay);
 
-                    using(new CompositeDisposable(sockets))
+                    while(!ct.IsCancellationRequested)
                     {
-                        var pollItems = sockets.Select(_ => ZPollItem.CreateReceiver()).ToArray();
-
-                        while(!ct.IsCancellationRequested)
+                        var msg = new NetMQMessage();
+                        if(sub.TryReceiveMultipartMessage(receiveTimeout, ref msg, 4))
                         {
-                            if(sockets.PollIn(pollItems, out var messages, out var error, timeout))
-                            {
-                                for(var i = 0; i < messages.Length; i++)
-                                {
-                                    var msg = messages[i];
-
-                                    if(msg != null)
-                                    {
-                                        lastMessageReceived[i] = clock.Now;
-
-                                        using(msg)
-                                        {
-                                            ProcessMessage(msg);
-                                        }
-                                    }
-
-                                    else if(clock.Now - lastMessageReceived[i] > reconnectTimeout)
-                                    {
-                                        // re-create socket
-                                        sockets[i].Dispose();
-                                        sockets[i] = SetupSubSocket(relays[i], true);
-
-                                        // reset clock
-                                        lastMessageReceived[i] = clock.Now;
-
-                                        logger.Info(() => $"Receive timeout of {reconnectTimeout.TotalSeconds} seconds exceeded. Re-connecting to {relays[i].Url} ...");
-                                    }
-                                }
-
-                                if(error != null)
-                                    logger.Error(() => $"{nameof(ShareReceiver)}: {error.Name} [{error.Name}] during receive");
-                            }
-
-                            else
-                            {
-                                // check for timeouts
-                                for(var i = 0; i < messages.Length; i++)
-                                {
-                                    if(clock.Now - lastMessageReceived[i] > reconnectTimeout)
-                                    {
-                                        // re-create socket
-                                        sockets[i].Dispose();
-                                        sockets[i] = SetupSubSocket(relays[i], true);
-
-                                        // reset clock
-                                        lastMessageReceived[i] = clock.Now;
-
-                                        logger.Info(() => $"Receive timeout of {reconnectTimeout.TotalSeconds} seconds exceeded. Re-connecting to {relays[i].Url} ...");
-                                    }
-                                }
-                            }
+                            lastReceived = clock.Now;
+                            ProcessMessage(msg);
+                        }
+                        else if(clock.Now - lastReceived > reconnectTimeout)
+                        {
+                            logger.Info(() => $"Receive timeout exceeded. Re-connecting to {relay.Url} ...");
+                            break;
                         }
                     }
                 }
 
                 catch(Exception ex)
                 {
-                    logger.Error(() => $"{nameof(ShareReceiver)}: {ex}");
+                    logger.Error(() => $"{nameof(BtStreamReceiver)}: {ex}");
 
                     if(!ct.IsCancellationRequested)
                         Thread.Sleep(1000);
                 }
             }
+        }, ct));
 
-            logger.Info(() => "Offline");
-        }, ct);
+        await Task.WhenAll(tasks);
+
+        logger.Info(() => "Offline");
     }
 }

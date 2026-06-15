@@ -1,4 +1,6 @@
-using System;
+// To run benchmarks: change [Fact(Skip = ...)] to [Fact] below, then:
+//   dotnet test src/Miningcore.Tests -c Release --filter "BenchmarkRunner"
+// Restore Skip afterwards so CI does not run them on every build.
 using BenchmarkDotNet.Configs;
 using BenchmarkDotNet.Loggers;
 using BenchmarkDotNet.Running;
@@ -17,7 +19,7 @@ public class Benchmarks
         this.output = output;
     }
 
-    [Fact(Skip = "** Uncomment me to run benchmarks **")]
+    [Fact(Skip = "Manual only – remove Skip to run BenchmarkDotNet suite")]
     public void Run_Benchmarks()
     {
         var logger = new AccumulationLogger();
@@ -28,7 +30,6 @@ public class Benchmarks
 
         BenchmarkRunner.Run<StratumConnectionBenchmarks>(config);
 
-        // write benchmark summary
         output.WriteLine(logger.GetLog());
     }
 }

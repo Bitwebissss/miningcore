@@ -30,6 +30,8 @@ public abstract class JobManagerBase<TJob>
     protected TJob currentJob;
     private int jobId;
     protected readonly object jobLock = new();
+
+    public abstract TJob GetJobForStratum();
     protected ILogger logger;
     protected PoolConfig poolConfig;
     protected bool hasInitialBlockTemplate = false;

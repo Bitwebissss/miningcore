@@ -1,5 +1,5 @@
 using System.Data;
-using AutoMapper;
+using MapsterMapper;
 using Dapper;
 using Miningcore.Persistence.Model;
 using Miningcore.Persistence.Repositories;
@@ -35,41 +35,23 @@ public class BalanceRepository : IBalanceRepository
 
         await con.ExecuteAsync(query, balanceChange, tx);
 
-        // update balance
-        query = "SELECT * FROM balances WHERE poolid = @poolId AND address = @address";
+        // Atomic upsert: insert on first seen, accumulate on subsequent calls.
+        // ON CONFLICT targets primary key (poolid, address) — no separate SELECT needed.
+        // 'created' is preserved on conflict — only 'updated' and 'amount' change.
+        query = @"INSERT INTO balances(poolid, address, amount, created, updated)
+            VALUES(@poolid, @address, @amount, @created, @updated)
+            ON CONFLICT (poolid, address) DO UPDATE
+                SET amount  = balances.amount + EXCLUDED.amount,
+                    updated = now() at time zone 'utc'";
 
-        var balance = (await con.QueryAsync<Entities.Balance>(query, new { poolId, address }, tx))
-            .FirstOrDefault();
-
-        if(balance == null)
+        return await con.ExecuteAsync(query, new
         {
-            balance = new Entities.Balance
-            {
-                PoolId = poolId,
-                Created = now,
-                Address = address,
-                Amount = amount,
-                Updated = now
-            };
-
-            query = @"INSERT INTO balances(poolid, address, amount, created, updated)
-                VALUES(@poolid, @address, @amount, @created, @updated)";
-
-            return await con.ExecuteAsync(query, balance, tx);
-        }
-
-        else
-        {
-            query = @"UPDATE balances SET amount = amount + @amount, updated = now() at time zone 'utc'
-                WHERE poolid = @poolId AND address = @address";
-
-            return await con.ExecuteAsync(query, new
-            {
-                poolId,
-                address,
-                amount
-            }, tx);
-        }
+            poolid  = poolId,
+            address,
+            amount,
+            created = now,
+            updated = now
+        }, tx);
     }
 
     public async Task<decimal> GetBalanceAsync(IDbConnection con, IDbTransaction tx, string poolId, string address)

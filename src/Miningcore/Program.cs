@@ -9,7 +9,8 @@ using AspNetCoreRateLimit;
 using Autofac;
 using Autofac.Extensions.DependencyInjection;
 using Autofac.Features.Metadata;
-using AutoMapper;
+using Mapster;
+using MapsterMapper;
 using Dapper;
 using FluentValidation;
 using McMaster.Extensions.CommandLineUtils;
@@ -26,20 +27,7 @@ using Miningcore.Api.Middlewares;
 using Miningcore.Api.Responses;
 using Miningcore.Configuration;
 using Miningcore.Crypto.Hashing.Algorithms;
-using Miningcore.Crypto.Hashing.Equihash;
-using Miningcore.Crypto.Hashing.Ethash.Etchash;
-using Miningcore.Crypto.Hashing.Ethash.Ethash;
-using Miningcore.Crypto.Hashing.Ethash.Ethashb3;
-using Miningcore.Crypto.Hashing.Ethash.Ubqhash;
-using Miningcore.Crypto.Hashing.Progpow.Evrprogpow;
-using Miningcore.Crypto.Hashing.Progpow.Firopow;
-using Miningcore.Crypto.Hashing.Progpow.Kawpow;
-using Miningcore.Crypto.Hashing.Progpow.Meowpow;
-using Miningcore.Crypto.Hashing.Progpow.Meraki;
-using Miningcore.Crypto.Hashing.Progpow.Phihash;
-using Miningcore.Crypto.Hashing.Progpow.Sccpow;
 using Miningcore.Extensions;
-using Miningcore.Messaging;
 using Miningcore.Mining;
 using Miningcore.Native;
 using Miningcore.Notifications;
@@ -49,7 +37,6 @@ using Miningcore.Persistence.Dummy;
 using Miningcore.Persistence.Postgres;
 using Miningcore.Persistence.Postgres.Repositories;
 using Miningcore.Util;
-using NBitcoin.Zcash;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Schema;
 using Newtonsoft.Json.Schema.Generation;
@@ -62,7 +49,6 @@ using NLog.Extensions.Logging;
 using NLog.Layouts;
 using NLog.Targets;
 using Prometheus;
-using WebSocketManager;
 using ILogger = NLog.ILogger;
 using LogLevel = Microsoft.Extensions.Logging.LogLevel;
 using static Miningcore.Util.ActionUtils;
@@ -134,7 +120,33 @@ public class Program : BackgroundService
                 .ConfigureServices((ctx, services) =>
                 {
                     services.AddHttpClient();
-                    services.AddMemoryCache();
+
+                    // Give BackgroundServices 58 seconds to finish before the runtime
+                    // forcibly cancels them. Aligned with TimeoutStopSec=60 in the
+                    // systemd unit (2s margin so the process exits cleanly before SIGKILL).
+                    // Without this the .NET default is only 5 seconds, which is not enough
+                    // for an in-flight sendmany RPC call + DB persist to complete.
+                    services.Configure<HostOptions>(opts =>
+                        opts.ShutdownTimeout = TimeSpan.FromSeconds(58));
+
+                    // Size-limited MemoryCache shared across the whole application.
+                    //
+                    // SizeLimit is a logical unit, NOT bytes — each cache.Set() call must
+                    // specify .SetSize(n) for this limit to be enforced.
+                    // PoolApiController sets size=1 per entry.
+                    //
+                    // ExpirationScanFrequency: how often the background scan looks for
+                    // expired entries.  Default is 1 minute; keep it short so evicted
+                    // pool entries don't linger in memory.
+                    //
+                    // CompactionPercentage: when the limit is exceeded, 25% of LRU entries
+                    // are evicted.
+                    services.AddMemoryCache(opts =>
+                    {
+                        opts.SizeLimit            = 512;   // at most 512 logical cache slots
+                        opts.ExpirationScanFrequency = TimeSpan.FromSeconds(30);
+                        opts.CompactionPercentage = 0.25;
+                    });
 
                     ConfigureBackgroundServices(services);
 
@@ -154,8 +166,8 @@ public class Program : BackgroundService
 
                 if(apiTlsEnable)
                 {
-                    if(!File.Exists(clusterConfig.Api.Tls.TlsPfxFile))
-                        throw new PoolStartupException($"Certificate file {clusterConfig.Api.Tls.TlsPfxFile} does not exist!");
+                    if(!File.Exists(clusterConfig.Api?.Tls?.TlsPfxFile))
+                        throw new PoolStartupException($"Certificate file {clusterConfig.Api?.Tls?.TlsPfxFile} does not exist!");
                 }
 
                 hostBuilder.ConfigureWebHost(builder =>
@@ -202,7 +214,6 @@ public class Program : BackgroundService
 
                         services.AddResponseCompression();
                         services.AddCors();
-                        services.AddWebSocketManager();
                     })
                     .UseKestrel(options =>
                     {
@@ -211,6 +222,10 @@ public class Program : BackgroundService
                             if(apiTlsEnable)
                                 listenOptions.UseHttps(clusterConfig.Api.Tls.TlsPfxFile, clusterConfig.Api.Tls.TlsPfxPassword);
                         });
+
+                        // Admin API on dedicated loopback-only port (no TLS needed — local only)
+                        if(clusterConfig.Api?.AdminPort.HasValue == true)
+                            options.Listen(IPAddress.Loopback, clusterConfig.Api.AdminPort.Value);
                     })
                     .Configure(app =>
                     {
@@ -223,6 +238,23 @@ public class Program : BackgroundService
                         {
                             "/api/admin"
                         }, clusterConfig.Api?.AdminIpWhitelist);
+
+                        // If AdminPort is configured — additionally block /api/admin on the public port
+                        if(clusterConfig.Api?.AdminPort.HasValue == true)
+                        {
+                            var adminPort = clusterConfig.Api.AdminPort.Value;
+                            app.Use(async (context, next) =>
+                            {
+                                if(context.Request.Path.StartsWithSegments("/api/admin")
+                                   && context.Connection.LocalPort != adminPort)
+                                {
+                                    context.Response.StatusCode = 403;
+                                    return;
+                                }
+                                await next();
+                            });
+                        }
+
                         UseIpWhiteList(app, true, new[]
                         {
                             "/metrics"
@@ -233,9 +265,14 @@ public class Program : BackgroundService
                         #endif
 
                         app.UseResponseCompression();
-                        app.UseCors(corsPolicyBuilder => corsPolicyBuilder.AllowAnyOrigin().AllowAnyMethod().AllowAnyHeader());
-                        app.UseWebSockets();
-                        app.MapWebSocketManager("/notifications", app.ApplicationServices.GetService<WebSocketNotificationsRelay>());
+                        if(clusterConfig.Api?.NoCors != true)
+                            app.UseCors(corsPolicyBuilder => corsPolicyBuilder.AllowAnyOrigin().AllowAnyMethod().AllowAnyHeader());
+                        app.UseWebSockets(new WebSocketOptions
+                        {
+                            KeepAliveInterval = TimeSpan.FromSeconds(30),
+                        });
+                        app.Map("/notifications", wsApp =>
+                            wsApp.Run(context => app.ApplicationServices.GetRequiredService<WebSocketNotificationsRelay>().HandleAsync(context)));
                         app.UseMetricServer();
 
                         app.UseMiddleware<ApiRequestMetricsMiddleware>();
@@ -245,6 +282,8 @@ public class Program : BackgroundService
 
                     logger.Info(() => $"Prometheus Metrics API listening on http{(apiTlsEnable ? "s" : "")}://{address}:{port}/metrics");
                     logger.Info(() => $"WebSocket Events streaming on ws{(apiTlsEnable ? "s" : "")}://{address}:{port}/notifications");
+                    if(clusterConfig.Api?.AdminPort.HasValue == true)
+                        logger.Info(() => $"Admin API listening on http://127.0.0.1:{clusterConfig.Api.AdminPort.Value}/api/admin (loopback only)");
                 });
             }
 
@@ -316,7 +355,14 @@ public class Program : BackgroundService
         // Payment processing
         if(clusterConfig.PaymentProcessing?.Enabled == true &&
            clusterConfig.Pools.Any(x => x.PaymentProcessing?.Enabled == true))
+        {
+            // BlockClassifierService: classifies pending blocks (confirmed/orphaned) and credits miner balances.
+            // Triggered by NewChainHeightNotification — event-driven, no separate timer.
+            services.AddHostedService<BlockClassifierService>();
+
+            // PayoutManager: reads credited balances and executes sendmany payments.
             services.AddHostedService<PayoutManager>();
+        }
         else
             logger.Info("Payment processing is not enabled");
 
@@ -354,9 +400,13 @@ public class Program : BackgroundService
         builder.RegisterInstance(pools);
         builder.RegisterInstance(gcStats);
 
-        // AutoMapper
-        var amConf = new MapperConfiguration(cfg => { cfg.AddProfile(new AutoMapperProfile()); });
-        builder.Register((ctx, parms) => amConf.CreateMapper());
+        // Mapster
+        var mapsterConfig = new TypeAdapterConfig();
+        mapsterConfig.Apply(new MapsterConfig());
+        builder.RegisterInstance(mapsterConfig);
+        builder.Register(ctx => new MapsterMapper.Mapper(ctx.Resolve<TypeAdapterConfig>()))
+            .As<MapsterMapper.IMapper>()
+            .SingleInstance();
 
         ConfigurePersistence(builder);
     }
@@ -469,13 +519,15 @@ public class Program : BackgroundService
 
             if(clusterConfig.Notifications?.Admin?.Enabled == true)
             {
-                if(string.IsNullOrEmpty(clusterConfig.Notifications?.Email?.FromName))
+                // Inside this block: Notifications and Admin are guaranteed non-null by the outer guard.
+                // Email is a separate property that may not be configured, so Email?. is still needed.
+                if(string.IsNullOrEmpty(clusterConfig.Notifications.Email?.FromName))
                     throw new PoolStartupException($"Notifications are enabled but email sender name is not configured (notifications.email.fromName)");
 
-                if(string.IsNullOrEmpty(clusterConfig.Notifications?.Email?.FromAddress))
+                if(string.IsNullOrEmpty(clusterConfig.Notifications.Email?.FromAddress))
                     throw new PoolStartupException($"Notifications are enabled but email sender address name is not configured (notifications.email.fromAddress)");
 
-                if(string.IsNullOrEmpty(clusterConfig.Notifications?.Admin?.EmailAddress))
+                if(string.IsNullOrEmpty(clusterConfig.Notifications.Admin.EmailAddress))
                     throw new PoolStartupException($"Admin notifications are enabled but recipient address is not configured (notifications.admin.emailAddress)");
             }
 
@@ -602,7 +654,9 @@ public class Program : BackgroundService
 
     private static JSchema LoadSchema()
     {
-        var basePath = Path.GetDirectoryName(Assembly.GetEntryAssembly().Location);
+        // GetDirectoryName returns null when the path has no directory component (e.g. single-file publish edge cases)
+        var basePath = Path.GetDirectoryName(Assembly.GetEntryAssembly().Location)
+            ?? throw new InvalidOperationException("Cannot determine entry-assembly directory; config.schema.json cannot be located.");
         var path = Path.Combine(basePath, "config.schema.json");
 
         using(var reader = new JsonTextReader(new StreamReader(File.OpenRead(path))))
@@ -631,17 +685,10 @@ public class Program : BackgroundService
  ██║╚██╔╝██║██║██║╚██╗██║██║██║╚██╗██║██║   ██║██║     ██║   ██║██╔══██╗██╔══╝
  ██║ ╚═╝ ██║██║██║ ╚████║██║██║ ╚████║╚██████╔╝╚██████╗╚██████╔╝██║  ██║███████╗
 ");
-        Console.WriteLine(" https://github.com/Kudaraidee/miningcore\n");
+        Console.WriteLine(" https://github.com/bitweb-project/miningcore\n");
         Console.WriteLine(" Donate to one of these addresses to support the project:\n");
-        Console.WriteLine(" ETH  - 0xbC059e88A4dD11c2E882Fc6B83F8Ec12E4CCCFad");
-        Console.WriteLine(" BTC  - 16xvkGfG9nrJSKKo5nGWphP8w4hr2ZzVuw");
-        Console.WriteLine(" LTC  - LLs76baYT7iMqQhizxtBC96Cy48iX3Eh1p");
-        Console.WriteLine(" DOGE - DFuvDSFh4N3SiXGDnye2Vbc8kqvMHbyQE1");
-        Console.WriteLine(" KAS  - kaspa:qpmf0wyu7c5z4l82ax9cfc5ughwk2f9lgu8uckkqrrpjqkxuk7yrga5nntvgn");
-        Console.WriteLine(" CCX  - ccx7S4B3gBeH1SGWCfqZp3NM7Vavg7H3S8ovJn8fU4bwC4vU7ChWfHtbNzifhrpbJ74bMDxj4KZFTcznTfsucCEg1Kgv7zbNgs");
-        Console.WriteLine(" FIRO - a5AsoTSkfPHQ3SUmR6binG1XW7oQQoFNU1");
-        Console.WriteLine(" ERGO - 9gYyuZzaSw3TiCtUkSRuS3XVDUv41EFs3dtNCFGqiEwHqpb7gkF");
-        Console.WriteLine(" XMR  - 483zaHtMRfM7rw1dXgebhWaRR8QLgAF6w4BomAV319FVVHfdbYTLVuBRc4pQgRAnRpfy6CXvvwngK4Lo3mRKE29RRx3Jb5c");
+        Console.WriteLine(" DPC  - dpc1qwn5yyehk5vr559hulqpamxv0h3rzr3q4dgzwuq");
+        Console.WriteLine(" BTE  - web1phf6davu3za3xfle6tp9ynuwksnf2faesyj9em9x2r3ukpfp98fesw37l5q");
         Console.WriteLine();
     }
 
@@ -675,7 +722,6 @@ public class Program : BackgroundService
                 var target = new FileTarget("file")
                 {
                     FileName = GetLogPath(config, config.ApiLogFile),
-                    FileNameKind = FilePathKind.Unknown,
                     Layout = layout
                 };
 
@@ -737,7 +783,6 @@ public class Program : BackgroundService
                 var target = new FileTarget("file")
                 {
                     FileName = GetLogPath(config, config.LogFile),
-                    FileNameKind = FilePathKind.Unknown,
                     Layout = layout
                 };
 
@@ -752,7 +797,6 @@ public class Program : BackgroundService
                     var target = new FileTarget(poolConfig.Id)
                     {
                         FileName = GetLogPath(config, poolConfig.Id + ".log"),
-                        FileNameKind = FilePathKind.Unknown,
                         Layout = layout
                     };
 
@@ -772,6 +816,11 @@ public class Program : BackgroundService
         if(string.IsNullOrEmpty(config.LogBaseDirectory))
             return name;
 
+        // If 'name' is already an absolute path (e.g. "/var/log/pool.log" from config),
+        // Path.Combine would silently discard LogBaseDirectory on Linux — guard against it.
+        if(Path.IsPathRooted(name))
+            return name;
+
         return Path.Combine(config.LogBaseDirectory, name);
     }
 
@@ -779,82 +828,12 @@ public class Program : BackgroundService
     {
         await ConfigurePostgresCompatibilityOptions(services);
 
-        ZcashNetworks.Instance.EnsureRegistered();
-
-        var messageBus = services.GetService<IMessageBus>();
-        var rmsm = services.GetService<RecyclableMemoryStreamManager>();
-
         // Configure RecyclableMemoryStream
-        var rmsmOptions = rmsm.Settings;
-        rmsmOptions.MaximumSmallPoolFreeBytes = clusterConfig.Memory?.RmsmMaximumFreeSmallPoolBytes ?? 0x100000;   // 1 MB
-        rmsmOptions.MaximumLargePoolFreeBytes = clusterConfig.Memory?.RmsmMaximumFreeLargePoolBytes ?? 0x800000;   // 8 MB
-        rmsm = new RecyclableMemoryStreamManager(rmsmOptions);
-
-        // Configure Equihash
-        EquihashSolver.messageBus = messageBus;
-        EquihashSolver.MaxThreads = clusterConfig.EquihashMaxThreads ?? 1;
-
-        // Configure Ethhash
-        Miningcore.Crypto.Hashing.Ethash.Ethash.Cache.messageBus = messageBus;
-
-        // Configure Etchash
-        Miningcore.Crypto.Hashing.Ethash.Etchash.Cache.messageBus = messageBus;
-        
-        // Configure Ethashb3
-        Miningcore.Crypto.Hashing.Ethash.Ethashb3.Cache.messageBus = messageBus;
-
-        // Configure Ubqhash
-        Miningcore.Crypto.Hashing.Ethash.Ubqhash.Cache.messageBus = messageBus;
-
-        // Configure Verthash
-        Verthash.messageBus = messageBus;
-
-        // Configure Cryptonight
-        Cryptonight.messageBus = messageBus;
-        Cryptonight.InitContexts(GetDefaultConcurrency(clusterConfig.CryptonightMaxThreads));
-
-        // Configure RandomX
-        RandomX.messageBus = messageBus;
-
-        // Configure RandomARQ
-        RandomARQ.messageBus = messageBus;
-
-        // Configure RandomSCASH
-        RandomSCASH.messageBus = messageBus;
-
-        // Configure RandomXEQ
-        RandomXEQ.messageBus = messageBus;
-
-        // Configure Panthera
-        Panthera.messageBus = messageBus;
-
-        // Configure NexaPow
-        Miningcore.Crypto.Hashing.Algorithms.NexaPow.messageBus = messageBus;
-        
-        // Configure BeamHash
-        BeamHash.messageBus = messageBus;
-        
-        // Configure Evrprogpow
-        Miningcore.Crypto.Hashing.Progpow.Evrprogpow.Cache.messageBus = messageBus;
-        
-        // Configure FiroPow
-        Miningcore.Crypto.Hashing.Progpow.Firopow.Cache.messageBus = messageBus;
-        
-        // Configure Kawpow
-        Miningcore.Crypto.Hashing.Progpow.Kawpow.Cache.messageBus = messageBus;
-
-        // Configure Meowpow
-        Miningcore.Crypto.Hashing.Progpow.Meowpow.Cache.messageBus = messageBus;
-
-        // Configure Meraki
-        Miningcore.Crypto.Hashing.Progpow.Meraki.Cache.messageBus = messageBus;
-
-        // Configure Phihash
-        Miningcore.Crypto.Hashing.Progpow.Phihash.Cache.messageBus = messageBus;
-
-        // Configure Sccpow
-        Miningcore.Crypto.Hashing.Progpow.Sccpow.Cache.messageBus = messageBus;
-
+        // Settings returns a reference to the internal Options object (class, not struct),
+        // so mutations here apply directly to the DI singleton — no need to create a new instance.
+        var rmsm = services.GetService<RecyclableMemoryStreamManager>();
+        rmsm.Settings.MaximumSmallPoolFreeBytes = clusterConfig.Memory?.RmsmMaximumFreeSmallPoolBytes ?? 0x100000;   // 1 MB
+        rmsm.Settings.MaximumLargePoolFreeBytes = clusterConfig.Memory?.RmsmMaximumFreeLargePoolBytes ?? 0x800000;   // 8 MB
     }
 
     private static async Task ConfigurePostgresCompatibilityOptions(IServiceProvider services)
@@ -874,7 +853,7 @@ public class Program : BackgroundService
             if(columnType != null)
                 enableLegacyTimestampBehavior = columnType.ToLower().Contains("without time zone");
             else
-                logger.Warn(() => "Unable to auto-detect Npgsql Legacy Timestamp Behavior. Please set 'EnableLegacyTimestamps' in your Miningcore Database configuration to'true' or 'false' to bypass auto-detection in case of problems");
+                logger.Warn(() => "Unable to auto-detect Npgsql Legacy Timestamp Behavior. Please set 'EnableLegacyTimestamps' in your Miningcore Database configuration to 'true' or 'false' to bypass auto-detection in case of problems");
         }
 
         else
@@ -945,7 +924,12 @@ public class Program : BackgroundService
 
         connectionString.Append($"CommandTimeout={pgConfig.CommandTimeout ?? 300};");
 
-        logger.Debug(()=> $"Using postgres connection string: {connectionString}");
+        var safeConnectionString = connectionString.ToString();
+        if(!string.IsNullOrEmpty(pgConfig.Password))
+            safeConnectionString = safeConnectionString.Replace($"Password={pgConfig.Password};", "Password=***;");
+        if(!string.IsNullOrEmpty(pgConfig.TlsPassword))
+            safeConnectionString = safeConnectionString.Replace($"SSL Password={pgConfig.TlsPassword};", "SSL Password=***;");
+        logger.Debug(()=> $"Using postgres connection string: {safeConnectionString}");
 
         // register connection factory
         builder.RegisterInstance(new PgConnectionFactory(connectionString.ToString()))
@@ -974,7 +958,8 @@ public class Program : BackgroundService
 
     private Dictionary<string, CoinTemplate> LoadCoinTemplates()
     {
-        var basePath = Path.GetDirectoryName(Assembly.GetEntryAssembly().Location);
+        var basePath = Path.GetDirectoryName(Assembly.GetEntryAssembly().Location)
+            ?? throw new InvalidOperationException("Cannot determine entry-assembly directory; coins.json cannot be located.");
         var defaultTemplates = Path.Combine(basePath, "coins.json");
 
         // make sure default templates are loaded first
@@ -997,7 +982,7 @@ public class Program : BackgroundService
                 IPAddress.Loopback, IPAddress.IPv6Loopback, IPUtils.IPv4LoopBackOnIPv6
             });
 
-        if(ipList.Count > 0)
+        if(ipList?.Count > 0)
         {
             // always allow access by localhost
             if(!ipList.Any(x => x.Equals(IPAddress.Loopback)))
@@ -1017,7 +1002,7 @@ public class Program : BackgroundService
     {
         options.EnableEndpointRateLimiting = false;
 
-        // exclude admin api and metrics from throtteling
+        // exclude admin api and metrics from throttling
         options.EndpointWhitelist = new List<string>
         {
             "*:/api/admin",

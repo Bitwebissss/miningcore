@@ -30,4 +30,5 @@ public record PaymentNotification
     public int RecipientsCount { get; set; }
     public decimal Amount { get; set; }
     public string Error { get; set; }
+    public decimal? TotalPaid { get; set; }
 }

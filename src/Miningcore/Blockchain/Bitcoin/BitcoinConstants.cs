@@ -16,14 +16,10 @@ public enum BitcoinAddressType
     BechSegwit,
 
     /// <summary>
-    /// Bitcoin Cash
+    /// Taproot (P2TR), bech32m encoding
     /// </summary>
-    BCash,
-    
-    /// <summary>
-    /// Litecoin
-    /// </summary>
-    Litecoin,
+    Taproot,
+
 }
 
 public enum BitcoinTransactionCategory
@@ -60,7 +56,7 @@ public class BitcoinConstants
     public const decimal SatoshisPerBitcoin = 100000000;
     public static readonly double Pow2x32 = Math.Pow(2, 32);
     public static readonly BigInteger Diff1 = BigInteger.Parse("00ffff0000000000000000000000000000000000000000000000000000", NumberStyles.HexNumber);
-    public const int CoinbaseMinConfimations = 102;
+    public const int CoinbaseMinConfirmations = 102;
 
     /// <summary>
     /// Pool-side mask for version-rolling (Overt ASIC-Boost)
@@ -146,7 +142,6 @@ public static class BitcoinCommands
     public const string ValidateAddress = "validateaddress";
     public const string GetAddressInfo = "getaddressinfo";
     public const string GetBlockTemplate = "getblocktemplate";
-    public const string GetBlockSubsidy = "getblocksubsidy";
     public const string SubmitBlock = "submitblock";
     public const string GetBlockchainInfo = "getblockchaininfo";
     public const string GetBlock = "getblock";

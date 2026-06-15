@@ -110,13 +110,13 @@ public class StratumConnection
                     {
                         ServerCertificate = cert,
                         ClientCertificateRequired = false,
-                        EnabledSslProtocols = SslProtocols.Tls11 | SslProtocols.Tls12 | SslProtocols.Tls13,
+                        EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13,
                         CertificateRevocationCheckMode = X509RevocationMode.NoCheck
                     }, cts.Token);
 
                     networkStream = sslStream;
 
-                    logger.Info(() => $"[{ConnectionId}] {sslStream.SslProtocol.ToString().ToUpper()}-{sslStream.CipherAlgorithm.ToString().ToUpper()} Connection from {RemoteEndpoint.Address.CensorOrReturn(gpdrCompliantLogging)}:{RemoteEndpoint.Port} accepted on port {endpoint.IPEndPoint.Port}");
+                    logger.Info(() => $"[{ConnectionId}] {sslStream.SslProtocol.ToString().ToUpper()}-{sslStream.NegotiatedCipherSuite.ToString().ToUpper()} Connection from {RemoteEndpoint.Address.CensorOrReturn(gpdrCompliantLogging)}:{RemoteEndpoint.Port} accepted on port {endpoint.IPEndPoint.Port}");
                 }
                 else
                     logger.Info(() => $"[{ConnectionId}] Connection from {RemoteEndpoint.Address.CensorOrReturn(gpdrCompliantLogging)}:{RemoteEndpoint.Port} accepted on port {endpoint.IPEndPoint.Port}");
@@ -207,11 +207,6 @@ public class StratumConnection
         return SendAsync(request);
     }
     
-    // Beam stratum API: https://github.com/BeamMW/beam/wiki/Beam-mining-protocol-API-(Stratum)
-    public Task NotifyAsync(object request)
-    {
-        return SendAsync(request);
-    }
 
     public void Disconnect()
     {
@@ -346,10 +341,10 @@ public class StratumConnection
 
     private async Task SendMessage(object msg, CancellationToken ct)
     {
-        await using var stream = rmsm.GetStream(nameof(StratumConnection)) as RecyclableMemoryStream;
+        await using var stream = rmsm.GetStream(nameof(StratumConnection));
 
         // serialize
-        await using (var writer = new StreamWriter(stream!, Encoding, -1, true))
+        await using (var writer = new StreamWriter(stream, Encoding, -1, true))
         {
             serializer.Serialize(writer, msg);
         }
@@ -373,8 +368,8 @@ public class StratumConnection
         Func<StratumConnection, JsonRpcRequest, CancellationToken, Task> onRequestAsync,
         ReadOnlySequence<byte> lineBuffer)
     {
-        await using var stream = rmsm.GetStream(nameof(StratumConnection), lineBuffer.ToSpan()) as RecyclableMemoryStream;
-        using var reader = new JsonTextReader(new StreamReader(stream!, Encoding));
+        await using var stream = rmsm.GetStream(nameof(StratumConnection), lineBuffer.ToSpan());
+        using var reader = new JsonTextReader(new StreamReader(stream, Encoding));
 
         var request = serializer.Deserialize<JsonRpcRequest>(reader);
 

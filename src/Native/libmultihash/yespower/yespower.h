@@ -130,23 +130,12 @@ extern int yespower_tls(const uint8_t *src, size_t srclen,
 extern int yespower_b2b_tls(const uint8_t *src, size_t srclen,
     const yespower_params_t *params, yespower_binary_t *dst);
 
+void yescryptR8_hash(const char *input, char *output, uint32_t len);
+void yescryptR16_hash(const char *input, char *output, uint32_t len);
+void yescryptR32_hash(const char *input, char *output, uint32_t len);
+
 void yespower_hash(const char* input, char* output, uint32_t len);
-void yespowerIC_hash(const char* input, char* output, uint32_t len);
-void yespowerIOTS_hash(const char* input, char* output, uint32_t len);
-void yespowerLTNCG_hash(const char* input, char* output, uint32_t len);
 void yespowerR16_hash(const char* input, char* output, uint32_t len);
-void yespowerRES_hash(const char* input, char* output, uint32_t len);
-void yespowerSUGAR_hash(const char* input, char* output, uint32_t len);
-void yespowerURX_hash(const char* input, char* output, uint32_t len);
-void yespowerLITB_hash(const char* input, char* output, uint32_t len);
-void yespowerTIDE_hash(const char* input, char* output, uint32_t len);
-void cpupower_hash(const char* input, char* output, uint32_t len);
-void power2b_hash(const char* input, char* output, uint32_t len);
-void yespowerMGPC_hash(const char* input, char* output, uint32_t len);
-void yespowerARWN_hash(const char* input, char* output, uint32_t len);
-void yespowerADVC_hash(const char* input, char* output, uint32_t len);
-void yespowerEQPAY_hash(const char* input, char* output, uint32_t len);
-void interchained_hash(const char* input, char* output, uint32_t len);
 
 #ifdef __cplusplus
 }

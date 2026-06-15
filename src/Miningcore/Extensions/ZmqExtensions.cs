@@ -1,12 +1,8 @@
 using System.Collections.Concurrent;
-using System.Reactive.Disposables;
-using System.Reactive.Linq;
 using System.Security.Cryptography;
-using System.Text;
-using Miningcore.Mining;
+using NetMQ;
 using NLog;
-using ZeroMQ;
-using ZeroMQ.Monitoring;
+using Org.BouncyCastle.Math.EC.Rfc7748;
 
 namespace Miningcore.Extensions;
 
@@ -16,134 +12,98 @@ public static class ZmqExtensions
 
     private static readonly ConcurrentDictionary<string, KeyData> knownKeys = new();
 
+    // Ephemeral client keypair – generated once per process for CURVE client sockets.
     private static readonly Lazy<KeyData> ownKey = new(() =>
     {
-        if(!ZContext.Has("curve"))
-            throw new NotSupportedException("ZMQ library does not support curve");
-
-        Z85.CurveKeypair(out var pubKey, out var secretKey);
-        return new KeyData(pubKey, secretKey);
+        var (pub, sec) = GenerateCurveKeypair();
+        return new KeyData(pub, sec);
     });
 
-    const int PasswordIterations = 5000;
-
+    private const int PasswordIterations = 5000;
     private static readonly byte[] noSalt = new byte[32];
 
     private static byte[] DeriveKey(string password, int length = 32)
     {
-        using(var kbd = new Rfc2898DeriveBytes(Encoding.UTF8.GetBytes(password), noSalt, PasswordIterations))
-        {
-            var block = kbd.GetBytes(length);
-            return block;
-        }
+        return Rfc2898DeriveBytes.Pbkdf2(
+            System.Text.Encoding.UTF8.GetBytes(password), noSalt, PasswordIterations, HashAlgorithmName.SHA256, length);
     }
 
-    private static long monitorSocketIndex = 0;
-
-    public static IObservable<ZMonitorEventArgs> MonitorAsObservable(this ZSocket socket)
+    /// <summary>Generates a random X25519 keypair suitable for CurveZMQ.</summary>
+    public static (byte[] PublicKey, byte[] SecretKey) GenerateCurveKeypair()
     {
-        return Observable.Defer(() => Observable.Create<ZMonitorEventArgs>(obs =>
-        {
-            var url = $"inproc://monitor{Interlocked.Increment(ref monitorSocketIndex)}";
-            var monitor = ZMonitor.Create(socket.Context, url);
-            var cts = new CancellationTokenSource();
+        var secretKey = new byte[X25519.ScalarSize];
+        RandomNumberGenerator.Fill(secretKey);
 
-            void OnEvent(object sender, ZMonitorEventArgs e)
-            {
-                obs.OnNext(e);
-            }
+        // RFC 7748 clamping
+        secretKey[0]  &= 248;
+        secretKey[31] &= 127;
+        secretKey[31] |= 64;
 
-            monitor.AllEvents += OnEvent;
-
-            socket.Monitor(url);
-            monitor.Start(cts);
-
-            return Disposable.Create(() =>
-            {
-                using(new CompositeDisposable(monitor, cts))
-                {
-                    monitor.AllEvents -= OnEvent;
-                    monitor.Stop();
-                }
-            });
-        }));
+        var publicKey = new byte[X25519.PointSize];
+        // ScalarMultBase(k, kOff, r, rOff): k = scalar input (secret), r = point output (public)
+        X25519.ScalarMultBase(secretKey, 0, publicKey, 0);
+        return (publicKey, secretKey);
     }
 
-    public static void LogMonitorEvent(ILogger logger, ZMonitorEventArgs e)
+    private static byte[] DerivePublicKey(byte[] secretKey)
     {
-        logger.Info(() => $"[ZMQ] [{e.Event.Address}] {Enum.GetName(typeof(ZMonitorEvents), e.Event.Event)} [{e.Event.EventValue}]");
+        var pub = new byte[X25519.PointSize];
+        // ScalarMultBase(k, kOff, r, rOff): k = scalar input (secret), r = point output (public)
+        X25519.ScalarMultBase(secretKey, 0, pub, 0);
+        return pub;
     }
 
     /// <summary>
-    /// Sets up server-side socket to utilize ZeroMQ Curve Transport-Layer Security
+    /// Configures server-side CurveZMQ on a NetMQ socket using a shared password.
+    /// Returns the 32-byte server public key, or null when keyPlain is empty/null.
     /// </summary>
-    public static void SetupCurveTlsServer(this ZSocket socket, string keyPlain, ILogger logger)
+    public static byte[] SetupCurveTlsServer(this NetMQSocket socket, string keyPlain, ILogger logger)
     {
-        keyPlain = keyPlain?.Trim();
+        if(keyPlain == null)
+            return null;
+
+        keyPlain = keyPlain.Trim();
+
+        if(string.IsNullOrEmpty(keyPlain))
+            return null;
+
+        if(!knownKeys.TryGetValue(keyPlain, out var keys))
+        {
+            var sec = DeriveKey(keyPlain, 32);
+            var pub = DerivePublicKey(sec);
+            keys = new KeyData(pub, sec);
+            knownKeys[keyPlain] = keys;
+        }
+
+        socket.Options.CurveServer = true;
+        socket.Options.CurveCertificate = new NetMQCertificate(keys.SecretKey, keys.PubKey);
+        return keys.PubKey;
+    }
+
+    /// <summary>
+    /// Configures client-side CurveZMQ on a NetMQ socket using a shared password.
+    /// No-op when keyPlain is empty/null.
+    /// </summary>
+    public static void SetupCurveTlsClient(this NetMQSocket socket, string keyPlain, ILogger logger)
+    {
+        if(keyPlain == null)
+            return;
+
+        keyPlain = keyPlain.Trim();
 
         if(string.IsNullOrEmpty(keyPlain))
             return;
 
-        if(!ZContext.Has("curve"))
-            throw new PoolStartupException("Unable to initialize ZMQ Curve Transport-Layer-Security. Your ZMQ library was compiled without Curve support!");
-
-        // Get server's public key
-        byte[] keyBytes = null;
-        byte[] serverPubKey = null;
-
-        if(!knownKeys.TryGetValue(keyPlain, out var serverKeys))
+        if(!knownKeys.TryGetValue(keyPlain, out var keys))
         {
-            keyBytes = DeriveKey(keyPlain, 32);
-
-            // Derive server's public-key from shared secret
-            Z85.CurvePublic(out serverPubKey, keyBytes.ToZ85Encoded());
-            knownKeys[keyPlain] = new KeyData(serverPubKey, keyBytes);
+            var sec = DeriveKey(keyPlain, 32);
+            var pub = DerivePublicKey(sec);
+            keys = new KeyData(pub, sec);
+            knownKeys[keyPlain] = keys;
         }
 
-        else
-        {
-            keyBytes = serverKeys.SecretKey;
-            serverPubKey = serverKeys.PubKey;
-        }
-
-        // set socket options
-        socket.CurveServer = true;
-        socket.CurveSecretKey = keyBytes;
-        socket.CurvePublicKey = serverPubKey;
-    }
-
-    /// <summary>
-    /// Sets up client-side socket to utilize ZeroMQ Curve Transport-Layer Security
-    /// </summary>
-    public static void SetupCurveTlsClient(this ZSocket socket, string keyPlain, ILogger logger)
-    {
-        keyPlain = keyPlain?.Trim();
-
-        if(string.IsNullOrEmpty(keyPlain))
-            return;
-
-        if(!ZContext.Has("curve"))
-            throw new PoolStartupException("Unable to initialize ZMQ Curve Transport-Layer-Security. Your ZMQ library was compiled without Curve support!");
-
-        // Get server's public key
-        byte[] serverPubKey = null;
-
-        if(!knownKeys.TryGetValue(keyPlain, out var serverKeys))
-        {
-            var keyBytes = DeriveKey(keyPlain, 32);
-
-            // Derive server's public-key from shared secret
-            Z85.CurvePublic(out serverPubKey, keyBytes.ToZ85Encoded());
-            knownKeys[keyPlain] = new KeyData(serverPubKey, keyBytes);
-        }
-
-        else
-            serverPubKey = serverKeys.PubKey;
-
-        // set socket options
-        socket.CurveServer = false;
-        socket.CurveServerKey = serverPubKey;
-        socket.CurveSecretKey = ownKey.Value.SecretKey;
-        socket.CurvePublicKey = ownKey.Value.PubKey;
+        socket.Options.CurveServer = false;
+        socket.Options.CurveServerKey = keys.PubKey;
+        socket.Options.CurveCertificate = new NetMQCertificate(ownKey.Value.SecretKey, ownKey.Value.PubKey);
     }
 }

@@ -1577,7 +1577,6 @@ namespace Microsoft.VisualStudio.TestTools.UnitTesting
                 {
                     if (newMin == 2)
                     {
-                        currentMin = i;
                         ambig = false;
                         currentMin = i;
                     }

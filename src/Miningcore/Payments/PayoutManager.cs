@@ -25,23 +25,17 @@ public class PayoutManager : BackgroundService
 {
     public PayoutManager(IComponentContext ctx,
         IConnectionFactory cf,
-        IBlockRepository blockRepo,
-        IShareRepository shareRepo,
         IBalanceRepository balanceRepo,
         ClusterConfig clusterConfig,
         IMessageBus messageBus)
     {
         Contract.RequiresNonNull(ctx);
         Contract.RequiresNonNull(cf);
-        Contract.RequiresNonNull(blockRepo);
-        Contract.RequiresNonNull(shareRepo);
         Contract.RequiresNonNull(balanceRepo);
         Contract.RequiresNonNull(messageBus);
 
         this.ctx = ctx;
         this.cf = cf;
-        this.blockRepo = blockRepo;
-        this.shareRepo = shareRepo;
         this.balanceRepo = balanceRepo;
         this.messageBus = messageBus;
         this.clusterConfig = clusterConfig;
@@ -52,10 +46,8 @@ public class PayoutManager : BackgroundService
 
     private static readonly ILogger logger = LogManager.GetCurrentClassLogger();
     private readonly IBalanceRepository balanceRepo;
-    private readonly IBlockRepository blockRepo;
     private readonly IConnectionFactory cf;
     private readonly IComponentContext ctx;
-    private readonly IShareRepository shareRepo;
     private readonly IMessageBus messageBus;
     private readonly TimeSpan interval;
     private readonly ConcurrentDictionary<string, IMiningPool> pools = new();
@@ -98,10 +90,8 @@ public class PayoutManager : BackgroundService
                 var handler = handlerImpl.Value;
                 await handler.ConfigureAsync(clusterConfig, poolConfig, ct);
 
-                // resolve payout scheme
-                var scheme = ctx.ResolveKeyed<IPayoutScheme>(poolConfig.PaymentProcessing.PayoutScheme);
-
-                await UpdatePoolBalancesAsync(pool, poolConfig, handler, scheme, ct);
+                // Block classification and balance crediting is handled by BlockClassifierService.
+                // PayoutManager only reads already-credited balances and executes sendmany.
                 await PayoutPoolBalancesAsync(pool, poolConfig, handler, ct);
             }
 
@@ -131,69 +121,8 @@ public class PayoutManager : BackgroundService
         }
     }
 
-    private static CoinFamily HandleFamilyOverride(CoinFamily family, PoolConfig pool)
-    {
-        switch(family)
-        {
-            case CoinFamily.Equihash:
-                var equihashTemplate = pool.Template.As<EquihashCoinTemplate>();
+    private static CoinFamily HandleFamilyOverride(CoinFamily family, PoolConfig pool) => family;
 
-                if(equihashTemplate.UseBitcoinPayoutHandler)
-                    return CoinFamily.Bitcoin;
-                break;
-
-            case CoinFamily.Progpow:
-                return CoinFamily.Bitcoin;
-        }
-
-        return family;
-    }
-
-    private async Task UpdatePoolBalancesAsync(IMiningPool pool, PoolConfig poolConfig, IPayoutHandler handler, IPayoutScheme scheme, CancellationToken ct)
-    {
-        // get pending blockRepo for pool
-        var pendingBlocks = await cf.Run(con => blockRepo.GetPendingBlocksForPoolAsync(con, poolConfig.Id));
-
-        // classify
-        var updatedBlocks = await handler.ClassifyBlocksAsync(pool, pendingBlocks, ct);
-
-        if(updatedBlocks.Any())
-        {
-            foreach(var block in updatedBlocks.OrderBy(x => x.Created))
-            {
-                logger.Info(() => $"Processing payments for pool {poolConfig.Id}, block {block.BlockHeight}");
-
-                await cf.RunTx(async (con, tx) =>
-                {
-                    if(!block.Effort.HasValue)  // fill block effort if empty
-                        await CalculateBlockEffortAsync(pool, poolConfig, block, handler, ct);
-
-                    if(!block.MinerEffort.HasValue)  // fill block effort if empty
-                        await CalculateMinerEffortAsync(pool, poolConfig, block, handler, ct);
-
-                    switch(block.Status)
-                    {
-                        case BlockStatus.Confirmed:
-                            // blockchains that do not support block-reward payments via coinbase Tx
-                            // must generate balance records for all reward recipients instead
-                            var blockReward = await handler.UpdateBlockRewardBalancesAsync(con, tx, pool, block, ct);
-
-                            await scheme.UpdateBalancesAsync(con, tx, pool, handler, block, blockReward, ct);
-                            await blockRepo.UpdateBlockAsync(con, tx, block);
-                            break;
-
-                        case BlockStatus.Orphaned:
-                        case BlockStatus.Pending:
-                            await blockRepo.UpdateBlockAsync(con, tx, block);
-                            break;
-                    }
-                });
-            }
-        }
-
-        else
-            logger.Info(() => $"No updated blocks for pool {poolConfig.Id}");
-    }
 
     private async Task PayoutPoolBalancesAsync(IMiningPool pool, PoolConfig config, IPayoutHandler handler, CancellationToken ct)
     {
@@ -220,62 +149,19 @@ public class PayoutManager : BackgroundService
 
     private Task NotifyPayoutFailureAsync(Balance[] balances, PoolConfig pool, Exception ex)
     {
-        messageBus.SendMessage(new PaymentNotification(pool.Id, ex.Message, balances.Sum(x => x.Amount), pool.Template.Symbol));
+        try
+        {
+            messageBus.SendMessage(new PaymentNotification(pool.Id, ex.Message, balances.Sum(x => x.Amount), pool.Template.Symbol));
+        }
+        catch(Exception notifyEx)
+        {
+            logger.Warn(notifyEx, $"[{pool.Id}] Failed to push payment failure notification");
+        }
 
         return Task.CompletedTask;
     }
 
-    private async Task CalculateBlockEffortAsync(IMiningPool pool, PoolConfig poolConfig, Block block, IPayoutHandler handler, CancellationToken ct)
-    {
-        // get share date-range
-        var from = DateTime.MinValue;
-        var to = block.Created;
 
-        // get last block for pool
-        var lastBlock = await cf.Run(con => blockRepo.GetBlockBeforeAsync(con, poolConfig.Id, new[]
-        {
-            BlockStatus.Confirmed,
-            BlockStatus.Orphaned,
-            BlockStatus.Pending,
-        }, block.Created));
-
-        if(lastBlock != null)
-            from = lastBlock.Created;
-
-        block.Effort = await cf.Run(con =>
-            shareRepo.GetEffectiveAccumulatedShareDifficultyBetweenAsync(con, pool.Config.Id, from, to, ct));
-
-        if(block.Effort.HasValue)
-            block.Effort = handler.AdjustBlockEffort(block.Effort.Value);
-    }
-
-    private async Task CalculateMinerEffortAsync(IMiningPool pool, PoolConfig poolConfig, Block block, IPayoutHandler handler, CancellationToken ct)
-    {
-
-        // get share date-range
-        var from = DateTime.MinValue;
-        var to = block.Created;
-
-        var miner = block.Miner;
-
-        // get last block for pool even for "MinerEffort". We use the same method as pool effort because adding miner address in the equation will just create an overlap in the final calculationMore actions
-        var lastBlock = await cf.Run(con => blockRepo.GetBlockBeforeAsync(con, poolConfig.Id, new[]
-        {
-            BlockStatus.Confirmed,
-            BlockStatus.Orphaned,
-            BlockStatus.Pending,
-        }, block.Created));
-
-        if(lastBlock != null)
-            from = lastBlock.Created;
-
-	block.MinerEffort = await cf.Run(con => shareRepo.GetMinerShareDifficultyBetweenAsync(con, pool.Config.Id, miner, from, to, ct));
-
-        if(block.MinerEffort.HasValue)
-            block.MinerEffort = handler.AdjustBlockEffort(block.MinerEffort.Value);
-
-
-    }
 
     protected override async Task ExecuteAsync(CancellationToken ct)
     {

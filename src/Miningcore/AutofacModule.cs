@@ -2,23 +2,9 @@ using System.Reflection;
 using Autofac;
 using Miningcore.Api;
 using Miningcore.Banning;
-using Miningcore.Blockchain.Alephium;
-using Miningcore.Blockchain.Beam;
 using Miningcore.Blockchain.Bitcoin;
-using Miningcore.Blockchain.Conceal;
-using Miningcore.Blockchain.Cryptonote;
-using Miningcore.Blockchain.Equihash;
-using Miningcore.Blockchain.Ergo;
-using Miningcore.Blockchain.Ethereum;
-using Miningcore.Blockchain.Handshake;
-using Miningcore.Blockchain.Kaspa;
-using Miningcore.Blockchain.Nexa;
-using Miningcore.Blockchain.Progpow;
 using Miningcore.Configuration;
 using Miningcore.Crypto;
-using Miningcore.Crypto.Hashing.Equihash;
-using Miningcore.Crypto.Hashing.Ethash;
-using Miningcore.Crypto.Hashing.Progpow;
 using Miningcore.Messaging;
 using Miningcore.Mining;
 using Miningcore.Notifications;
@@ -91,23 +77,6 @@ public class AutofacModule : Module
                 t.GetInterfaces().Any(i => i.IsAssignableFrom(typeof(IHashAlgorithm))))
             .Named<IHashAlgorithm>(t=> t.GetCustomAttributes<IdentifierAttribute>().First().Name)
             .PropertiesAutowired();
-        
-        builder.RegisterAssemblyTypes(ThisAssembly)
-            .Where(t => t.GetCustomAttributes<IdentifierAttribute>().Any() &&
-                t.GetInterfaces().Any(i => i.IsAssignableFrom(typeof(IEthashLight))))
-            .Named<IEthashLight>(t => t.GetCustomAttributes<IdentifierAttribute>().First().Name)
-            .PropertiesAutowired();
-
-        builder.RegisterAssemblyTypes(ThisAssembly)
-            .Where(t => t.GetCustomAttributes<IdentifierAttribute>().Any() &&
-                t.GetInterfaces().Any(i => i.IsAssignableFrom(typeof(IProgpowLight))))
-            .Named<IProgpowLight>(t => t.GetCustomAttributes<IdentifierAttribute>().First().Name)
-            .PropertiesAutowired();
-
-        builder.RegisterAssemblyTypes(ThisAssembly)
-            .Where(t => t.IsAssignableTo<EquihashSolver>())
-            .PropertiesAutowired()
-            .AsSelf();
 
         builder.RegisterAssemblyTypes(ThisAssembly)
             .Where(t => t.IsAssignableTo<ControllerBase>())
@@ -129,6 +98,9 @@ public class AutofacModule : Module
         // Background services
 
         builder.RegisterType<PayoutManager>()
+            .SingleInstance();
+
+        builder.RegisterType<BlockClassifierService>()
             .SingleInstance();
 
         builder.RegisterType<ShareRecorder>()
@@ -172,62 +144,9 @@ public class AutofacModule : Module
             .SingleInstance();
         
         //////////////////////
-        // Alephium
-
-        builder.RegisterType<AlephiumJobManager>();
-        
-        //////////////////////
-        // Beam
-
-        builder.RegisterType<BeamJobManager>();
-        
-        //////////////////////
         // Bitcoin and family
 
         builder.RegisterType<BitcoinJobManager>();
-
-        //////////////////////
-        // Conceal
-
-        builder.RegisterType<ConcealJobManager>();
-        
-        //////////////////////
-        // Cryptonote
-
-        builder.RegisterType<CryptonoteJobManager>();
-
-        //////////////////////
-        // ZCash
-
-        builder.RegisterType<EquihashJobManager>();
-
-        //////////////////////
-        // Ergo
-
-        builder.RegisterType<ErgoJobManager>();
-
-        //////////////////////
-        // Ethereum
-
-        builder.RegisterType<EthereumJobManager>();
-
-        //////////////////////
-        // Handshake
-        builder.RegisterType<HandshakeJobManager>();
-        
-        //////////////////////
-        // Kaspa
-
-        builder.RegisterType<KaspaJobManager>();
-
-        //////////////////////
-        // Nexa
-        builder.RegisterType<NexaJobManager>();
-        
-        //////////////////////
-        // Progpow
-
-        builder.RegisterType<ProgpowJobManager>();
 
         base.Load(builder);
     }

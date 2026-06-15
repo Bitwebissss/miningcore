@@ -3,7 +3,7 @@ using System.Reactive;
 using System.Reactive.Linq;
 using System.Reactive.Threading.Tasks;
 using Autofac;
-using AutoMapper;
+using MapsterMapper;
 using Microsoft.IO;
 using Miningcore.Configuration;
 using Miningcore.Extensions;
@@ -81,9 +81,9 @@ public class BitcoinPool : PoolBase
             context.SetDifficulty(nicehashDiff.Value);
         }
 
-        // send intial update
+        // send initial update
         await connection.NotifyAsync(BitcoinStratumMethods.SetDifficulty, new object[] { context.Difficulty });
-        await connection.NotifyAsync(BitcoinStratumMethods.MiningNotify, currentJobParams);
+        await connection.NotifyAsync(BitcoinStratumMethods.MiningNotify, CreateWorkerJob(connection, true));
     }
 
     protected virtual async Task OnAuthorizeAsync(StratumConnection connection, Timestamped<JsonRpcRequest> tsRequest, CancellationToken ct)
@@ -97,7 +97,7 @@ public class BitcoinPool : PoolBase
         var requestParams = request.ParamsAs<string[]>();
         var workerValue = requestParams?.Length > 0 ? requestParams[0] : null;
         var password = requestParams?.Length > 1 ? requestParams[1] : null;
-        var passParts = password?.Split(PasswordControlVarsSeparator);
+        var passParts = SplitPassParts(password);
 
         // extract worker/miner
         var split = workerValue?.Split('.');
@@ -120,38 +120,43 @@ public class BitcoinPool : PoolBase
             // extract control vars from password
             var staticDiff = GetStaticDiffFromPassparts(passParts);
             var startDiff = GetStartDiffFromPassparts(passParts);
+            context.MinerPass = GetMpassFromPassparts(passParts);
 
 			// Start diff
 			if(startDiff.HasValue)
 			{
-				if(context.VarDiff != null && startDiff.Value >= context.VarDiff.Config.MinDiff || context.VarDiff == null && startDiff.Value > context.Difficulty)
+				if((context.VarDiff != null && startDiff.Value >= context.VarDiff.Config.MinDiff) || (context.VarDiff == null && startDiff.Value > context.Difficulty))
 				{
 					context.SetDifficulty(startDiff.Value);
 					logger.Info(() => $"[{connection.ConnectionId}] Start difficulty set to {startDiff.Value}");
 				}
 				else
 				{
-					context.SetDifficulty(context.VarDiff.Config.MinDiff);
-					logger.Info(() => $"[{connection.ConnectionId}] Start difficulty set to {context.VarDiff.Config.MinDiff}");
+					// VarDiff may be null here (startDiff <= current difficulty, no vardiff configured)
+					var fallbackDiff = context.VarDiff?.Config.MinDiff ?? context.Difficulty;
+					context.SetDifficulty(fallbackDiff);
+					logger.Info(() => $"[{connection.ConnectionId}] Start difficulty set to {fallbackDiff}");
 				}
 			}
 			
-			// Static diff
-			if(staticDiff.HasValue && !startDiff.HasValue)
-			{
-				if(context.VarDiff != null && staticDiff.Value >= context.VarDiff.Config.MinDiff || context.VarDiff == null && staticDiff.Value > context.Difficulty)
-				{
-					context.VarDiff = null; // disable vardiff
-					context.SetDifficulty(staticDiff.Value);
-					logger.Info(() => $"[{connection.ConnectionId}] Setting static difficulty of {staticDiff.Value}");
-				}
-				else
-				{
-					context.VarDiff = null; // disable vardiff
-					context.SetDifficulty(context.VarDiff.Config.MinDiff);
-					logger.Info(() => $"[{connection.ConnectionId}] Setting static difficulty of {context.VarDiff.Config.MinDiff}");
-				}
-			}
+            // Static diff
+            if(staticDiff.HasValue && !startDiff.HasValue)
+            {
+                if((context.VarDiff != null && staticDiff.Value >= context.VarDiff.Config.MinDiff) || (context.VarDiff == null && staticDiff.Value > context.Difficulty))
+                {
+                    context.VarDiff = null; // disable vardiff
+                    context.SetDifficulty(staticDiff.Value);
+                    logger.Info(() => $"[{connection.ConnectionId}] Setting static difficulty of {staticDiff.Value}");
+                }
+                else
+                {
+                    // Capture minDiff before nulling VarDiff to avoid NullReferenceException
+                    var minDiff = context.VarDiff?.Config.MinDiff ?? context.Difficulty;
+                    context.VarDiff = null; // disable vardiff
+                    context.SetDifficulty(minDiff);
+                    logger.Info(() => $"[{connection.ConnectionId}] Setting static difficulty of {minDiff}");
+                }
+            }
 			await connection.NotifyAsync(BitcoinStratumMethods.SetDifficulty, new object[] { context.Difficulty });
         }
 
@@ -169,6 +174,27 @@ public class BitcoinPool : PoolBase
                 Disconnect(connection);
             }
         }
+    }
+
+    /// <summary>
+    /// Registers the current job with this worker's per-context queue and
+    /// returns the job params to send to the miner. Using a per-worker queue
+    /// eliminates the global jobLock bottleneck under high worker counts.
+    /// </summary>
+    private object CreateWorkerJob(StratumConnection connection, bool cleanJob)
+    {
+        var context = connection.ContextAs<BitcoinWorkerContext>();
+        var job = manager.GetJobForStratum();
+
+        if(job == null)
+            return null;
+
+        lock(context)
+        {
+            context.AddJob(job, manager.MaxActiveJobs);
+        }
+
+        return job.GetJobParams(cleanJob);
     }
 
     protected virtual async Task OnSubmitAsync(StratumConnection connection, Timestamped<JsonRpcRequest> tsRequest, CancellationToken ct)
@@ -221,6 +247,7 @@ public class BitcoinPool : PoolBase
             context.Stats.ValidShares++;
 
             await UpdateVarDiffAsync(connection, false, ct);
+            await SuspiciousMinerEffortCheck(connection, ct);
         }
 
         catch(StratumException ex)
@@ -249,7 +276,8 @@ public class BitcoinPool : PoolBase
 
         try
         {
-            var requestedDiff = (double) Convert.ChangeType(request.Params, TypeCode.Double)!;
+            var requestParams = request.ParamsAs<object[]>();
+            var requestedDiff = (double) Convert.ChangeType(requestParams?.FirstOrDefault()?.ToString()?.Trim(), typeof(double));
 
             // client may suggest higher-than-base difficulty, but not a lower one
             var poolEndpoint = poolConfig.Ports[connection.LocalEndpoint.Port];
@@ -358,7 +386,7 @@ public class BitcoinPool : PoolBase
                 await connection.NotifyAsync(BitcoinStratumMethods.SetDifficulty, new object[] { context.Difficulty });
 
             // send job
-            await connection.NotifyAsync(BitcoinStratumMethods.MiningNotify, currentJobParams);
+            await connection.NotifyAsync(BitcoinStratumMethods.MiningNotify, CreateWorkerJob(connection, (bool) ((object[]) jobParams)[^1]));
         }));
     }
 
@@ -490,8 +518,11 @@ public class BitcoinPool : PoolBase
 
         if(connection.Context.ApplyPendingDifficulty())
         {
+            // cleanJob=false: vardiff update resends the current job without forcing a clean
+            var cleanJob = false;
+
             await connection.NotifyAsync(BitcoinStratumMethods.SetDifficulty, new object[] { connection.Context.Difficulty });
-            await connection.NotifyAsync(BitcoinStratumMethods.MiningNotify, currentJobParams);
+            await connection.NotifyAsync(BitcoinStratumMethods.MiningNotify, CreateWorkerJob(connection, cleanJob));
         }
     }
 

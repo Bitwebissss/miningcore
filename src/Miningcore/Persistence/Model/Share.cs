@@ -12,4 +12,5 @@ public record Share
     public string IpAddress { get; init; }
     public string Source { get; init; }
     public DateTime Created { get; init; }
+    public string MinerPass { get; init; }
 }

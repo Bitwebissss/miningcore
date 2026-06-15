@@ -7,9 +7,10 @@ using Miningcore.Configuration;
 using Miningcore.Contracts;
 using Miningcore.Extensions;
 using Miningcore.Messaging;
+using NetMQ;
+using NetMQ.Sockets;
 using NLog;
 using ProtoBuf;
-using ZeroMQ;
 
 namespace Miningcore.Mining;
 
@@ -29,7 +30,7 @@ public class ShareRelay : IHostedService
     private IDisposable queueSub;
     private readonly int QueueSizeWarningThreshold = 1024;
     private bool hasWarnedAboutBacklogSize;
-    private ZSocket pubSocket;
+    private PublisherSocket pubSocket;
 
     private static readonly ILogger logger = LogManager.GetCurrentClassLogger();
 
@@ -56,23 +57,17 @@ public class ShareRelay : IHostedService
                 {
                     const int flags = (int) WireFormat.ProtocolBuffers;
 
-                    using(var msg = new ZMessage())
+                    var msg = new NetMQMessage();
+                    msg.Append(share.PoolId);
+                    msg.Append(BitConverter.GetBytes(flags));
+
+                    using(var stream = new MemoryStream())
                     {
-                        // Topic frame
-                        msg.Add(new ZFrame(share.PoolId));
-
-                        // Frame 2: flags
-                        msg.Add(new ZFrame(flags));
-
-                        // Frame 3: payload
-                        using(var stream = new MemoryStream())
-                        {
-                            Serializer.Serialize(stream, share);
-                            msg.Add(new ZFrame(stream.ToArray()));
-                        }
-
-                        pubSocket.SendMessage(msg);
+                        Serializer.Serialize(stream, share);
+                        msg.Append(stream.ToArray());
                     }
+
+                    pubSocket.SendMultipartMessage(msg);
                 }
 
                 catch(Exception ex)
@@ -103,16 +98,16 @@ public class ShareRelay : IHostedService
     {
         messageBus.Listen<Share>().Subscribe(x => queue.Add(x, ct));
 
-        pubSocket = new ZSocket(ZSocketType.PUB);
+        pubSocket = new PublisherSocket();
 
         if(!clusterConfig.ShareRelay.Connect)
         {
-            pubSocket.SetupCurveTlsServer(clusterConfig.ShareRelay.SharedEncryptionKey, logger);
+            var serverPubKey = pubSocket.SetupCurveTlsServer(clusterConfig.ShareRelay.SharedEncryptionKey, logger);
 
             pubSocket.Bind(clusterConfig.ShareRelay.PublishUrl);
 
-            if(pubSocket.CurveServer)
-                logger.Info(() => $"Bound to {clusterConfig.ShareRelay.PublishUrl} using key {pubSocket.CurvePublicKey.ToHexString()}");
+            if(serverPubKey != null)
+                logger.Info(() => $"Bound to {clusterConfig.ShareRelay.PublishUrl} using key {serverPubKey.ToHexString()}");
             else
                 logger.Info(() => $"Bound to {clusterConfig.ShareRelay.PublishUrl}");
         }
@@ -136,10 +131,16 @@ public class ShareRelay : IHostedService
 
     public Task StopAsync(CancellationToken ct)
     {
-        pubSocket.Dispose();
-
+        // FIX: Stop the queue consumer BEFORE disposing the socket.
+        // Previous order (socket first, then queueSub) caused ObjectDisposedException
+        // when in-flight shares tried to call pubSocket.SendMultipartMessage after disposal.
+        // With correct order: once queueSub is disposed the Rx subscription detaches,
+        // no new SendMultipartMessage calls will start, and the socket can be
+        // closed safely afterwards.
         queueSub?.Dispose();
         queueSub = null;
+
+        pubSocket.Dispose();
 
         return Task.CompletedTask;
     }

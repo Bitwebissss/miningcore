@@ -116,6 +116,10 @@ public class MetricsPublisher : BackgroundService
                 stratumRequestDurationSummary.WithLabels(msg.GroupId, msg.Info).Observe(msg.Elapsed.TotalMilliseconds);
                 break;
 
+            case TelemetryCategory.ApiRequest:
+                apiRequestDurationSummary.WithLabels(msg.GroupId ?? string.Empty).Observe(msg.Elapsed.TotalMilliseconds);
+                break;
+
             case TelemetryCategory.Connections:
                 poolConnectionsGauge.WithLabels(msg.GroupId).Set(msg.Total);
                 break;
@@ -126,9 +130,9 @@ public class MetricsPublisher : BackgroundService
         }
     }
 
-    private void OnHashrateNotification(HashrateNotification msg)
+    private void OnCycleStatsNotification(CycleStatsNotification msg)
     {
-        poolHashrateGauge.WithLabels(msg.PoolId).Set(msg.Hashrate);
+        poolHashrateGauge.WithLabels(msg.PoolId).Set(msg.PoolHashrate);
     }
 
     protected override Task ExecuteAsync(CancellationToken ct)
@@ -138,12 +142,12 @@ public class MetricsPublisher : BackgroundService
             .Do(x=> Guard(()=> OnTelemetryEvent(x), ex=> logger.Error(ex.Message)))
             .Select(_=> Unit.Default);
 
-        var hashrateNotifications = messageBus.Listen<HashrateNotification>()
+        var cycleStatsNotifications = messageBus.Listen<CycleStatsNotification>()
             .ObserveOn(TaskPoolScheduler.Default)
-            .Do(x=> Guard(()=> OnHashrateNotification(x), ex=> logger.Error(ex.Message)))
+            .Do(x=> Guard(()=> OnCycleStatsNotification(x), ex=> logger.Error(ex.Message)))
             .Select(_=> Unit.Default);
 
-        return Observable.Merge(telemetryEvents, hashrateNotifications)
+        return Observable.Merge(telemetryEvents, cycleStatsNotifications)
             .ToTask(ct);
     }
 }

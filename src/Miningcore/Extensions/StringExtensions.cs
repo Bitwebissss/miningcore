@@ -133,4 +133,28 @@ public static class StringExtensions
 
         return str[..1].ToUpper() + str[1..];
     }
+
+    /// <summary>
+    /// Masks a wallet/payout address for public-facing REST and WebSocket responses by keeping only
+    /// the first 12 and last 6 characters (eg. "web1pm4tcwj3...vmh0et").
+    ///
+    /// This MUST stay byte-for-byte identical to the frontend's display truncation
+    /// (poolmainpage/assets/js/pool.js, fmt.addr(a, 12)) — both the slice points (12 / 6) and the
+    /// "leave short strings untouched" guard (length &lt;= 25). The frontend compares its own
+    /// locally-truncated address against this masked value to detect "is this my block" in the
+    /// myminer tab, so any divergence here silently breaks that comparison.
+    ///
+    /// Does not mutate the input — returns a new string, safe to call on values that are also used
+    /// elsewhere (eg. persistence entities) without affecting those other uses.
+    /// </summary>
+    public static string MaskAddress(this string address)
+    {
+        const int prefixLen = 12;
+        const int suffixLen = 6;
+
+        if(string.IsNullOrEmpty(address) || address.Length <= prefixLen + suffixLen + 1)
+            return address;
+
+        return $"{address[..prefixLen]}...{address[^suffixLen..]}";
+    }
 }

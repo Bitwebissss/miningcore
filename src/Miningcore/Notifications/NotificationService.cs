@@ -26,7 +26,7 @@ public class NotificationService : BackgroundService
         Contract.RequiresNonNull(messageBus);
 
         this.clusterConfig = clusterConfig;
-        emailSenderConfig = clusterConfig.Notifications.Email;
+        emailSenderConfig = clusterConfig.Notifications?.Email;
         this.messageBus = messageBus;
         this.pushoverClient = pushoverClient;
 
@@ -66,7 +66,8 @@ public class NotificationService : BackgroundService
         {
             await Guard(() => SendEmailAsync(adminEmail, subject, message, ct), LogGuarded);
 
-            if(clusterConfig.Notifications?.Pushover?.Enabled == true)
+            // Notifications is non-null here (proven by outer guard); Pushover itself may be null
+            if(clusterConfig.Notifications.Pushover?.Enabled == true)
                 await Guard(() => pushoverClient.PushMessage(subject, message, PushoverMessagePriority.None, ct), LogGuarded);
         }
     }
@@ -90,7 +91,8 @@ public class NotificationService : BackgroundService
             {
                 await Guard(() => SendEmailAsync(adminEmail, subject, message, ct), LogGuarded);
 
-                if(clusterConfig.Notifications?.Pushover?.Enabled == true)
+                // Notifications is non-null here (proven by outer guard); Pushover itself may be null
+                if(clusterConfig.Notifications.Pushover?.Enabled == true)
                     await Guard(() => pushoverClient.PushMessage(subject, message, PushoverMessagePriority.None, ct), LogGuarded);
             }
         }
@@ -111,7 +113,7 @@ public class NotificationService : BackgroundService
     {
         logger.Info(() => $"Sending '{subject.ToLower()}' email to {recipient}");
 
-        var message = new MimeMessage();
+        using var message = new MimeMessage();
         message.From.Add(new MailboxAddress(emailSenderConfig.FromName, emailSenderConfig.FromAddress));
         message.To.Add(new MailboxAddress("", recipient));
         message.Subject = subject;

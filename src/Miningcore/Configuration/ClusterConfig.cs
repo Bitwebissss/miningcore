@@ -16,41 +16,8 @@ namespace Miningcore.Configuration;
 
 public enum CoinFamily
 {
-    [EnumMember(Value = "alephium")]
-    Alephium,
-    
-    [EnumMember(Value = "beam")]
-    Beam,
-
     [EnumMember(Value = "bitcoin")]
     Bitcoin,
-
-    [EnumMember(Value = "conceal")]
-    Conceal,
-    
-    [EnumMember(Value = "cryptonote")]
-    Cryptonote,
-    
-    [EnumMember(Value = "equihash")]
-    Equihash,
-    
-    [EnumMember(Value = "ergo")]
-    Ergo,
-
-    [EnumMember(Value = "ethereum")]
-    Ethereum,
-    
-    [EnumMember(Value = "handshake")]
-    Handshake,
-        
-    [EnumMember(Value = "kaspa")]
-    Kaspa,
-
-    [EnumMember(Value = "nexa")]
-    Nexa,
-
-    [EnumMember(Value = "progpow")]
-    Progpow,
 }
 
 public abstract partial class CoinTemplate
@@ -84,7 +51,6 @@ public abstract partial class CoinTemplate
     /// </summary>
     [JsonProperty(Order = -9)]
     public string Market { get; set; }
-
 
     /// <summary>
     /// Family
@@ -131,7 +97,7 @@ public abstract partial class CoinTemplate
     public string Discord { get; set; }
 
     /// <summary>
-    /// Telegram Group Link
+    /// GitHub Repository Link
     /// </summary>
     [JsonProperty(Order = -9)]
     public string Github { get; set; }
@@ -149,41 +115,40 @@ public abstract partial class CoinTemplate
     public IDictionary<string, object> Extra { get; set; }
 
     /// <summary>
-    /// Coin Family associciations
+    /// Coin Family associations
     /// </summary>
     [JsonIgnore]
     public static readonly Dictionary<CoinFamily, Type> Families = new()
     {
-        {CoinFamily.Alephium, typeof(AlephiumCoinTemplate)},
-        {CoinFamily.Beam, typeof(BeamCoinTemplate)},
         {CoinFamily.Bitcoin, typeof(BitcoinTemplate)},
-        {CoinFamily.Conceal, typeof(ConcealCoinTemplate)},
-        {CoinFamily.Cryptonote, typeof(CryptonoteCoinTemplate)},
-        {CoinFamily.Equihash, typeof(EquihashCoinTemplate)},
-        {CoinFamily.Ergo, typeof(ErgoCoinTemplate)},
-        {CoinFamily.Ethereum, typeof(EthereumCoinTemplate)},
-        {CoinFamily.Handshake, typeof(BitcoinTemplate)},
-        {CoinFamily.Kaspa, typeof(KaspaCoinTemplate)},
-        {CoinFamily.Nexa, typeof(BitcoinTemplate)},
-        {CoinFamily.Progpow, typeof(ProgpowCoinTemplate)},
     };
-}
-
-public partial class AlephiumCoinTemplate : CoinTemplate
-{
-}
-
-public partial class BeamCoinTemplate : CoinTemplate
-{
 }
 
 public enum BitcoinSubfamily
 {
     [EnumMember(Value = "none")]
     None,
+}
 
-    //[EnumMember(Value = "florincoin")]
-    //Florincoin,
+public class ExtendedMaturityConfig
+{
+    /// <summary>
+    /// Block height at which the extended maturity period begins (inclusive).
+    /// </summary>
+    public ulong StartHeight { get; set; }
+
+    /// <summary>
+    /// Number of blocks in the extended maturity period.
+    /// EndHeight is computed as StartHeight + PeriodLength.
+    /// Mirrors EXT_COINBASE_MATURITY in the node source.
+    /// </summary>
+    public ulong PeriodLength { get; set; }
+
+    /// <summary>
+    /// Computed end height (exclusive). Blocks with height >= EndHeight use standard maturity.
+    /// </summary>
+    [JsonIgnore]
+    public ulong EndHeight => StartHeight + PeriodLength;
 }
 
 public partial class BitcoinTemplate : CoinTemplate
@@ -222,56 +187,11 @@ public partial class BitcoinTemplate : CoinTemplate
     public string CoinbaseTxComment { get; set; }
 
     [JsonProperty(DefaultValueHandling = DefaultValueHandling.Ignore)]
-    public bool HasPayee { get; set; }
-
-    [JsonProperty(DefaultValueHandling = DefaultValueHandling.Ignore)]
-    public bool HasMasterNodes { get; set; }
-    
-    [JsonProperty(DefaultValueHandling = DefaultValueHandling.Ignore)]
-    public bool HasSmartNodes { get; set; }
-
-    [JsonProperty(DefaultValueHandling = DefaultValueHandling.Ignore)]
     public bool HasBrokenSendMany { get; set; } = false;
-
-    [JsonProperty(DefaultValueHandling = DefaultValueHandling.Ignore)]
-    public bool HasFounderFee { get; set; }
-
-    [JsonProperty(DefaultValueHandling = DefaultValueHandling.Ignore)]
-    public bool HasDevFee { get; set; }
-
-    [JsonProperty(DefaultValueHandling = DefaultValueHandling.Ignore)]
-    public bool HasCommunity { get; set; }
-
-    [JsonProperty(DefaultValueHandling = DefaultValueHandling.Ignore)]
-    public bool HasDeveloper { get; set; }
-
-    [JsonProperty(DefaultValueHandling = DefaultValueHandling.Ignore)]
-    public bool HasDataMining { get; set; }
-
-    [JsonProperty(DefaultValueHandling = DefaultValueHandling.Ignore)]
-    public bool HasMinerDevFund { get; set; }
-
-    [JsonProperty(DefaultValueHandling = DefaultValueHandling.Ignore)]
-    public bool HasMinerFund { get; set; }
-
-    [JsonProperty(DefaultValueHandling = DefaultValueHandling.Ignore)]
-    public bool HasCommunityAddress { get; set; }
-
-    [JsonProperty(DefaultValueHandling = DefaultValueHandling.Ignore)]
-    public bool HasCoinbaseDevReward { get; set; }
-
-    [JsonProperty(DefaultValueHandling = DefaultValueHandling.Ignore)]
-    public bool HasFoundation { get; set; }
-
-    [JsonProperty(DefaultValueHandling = DefaultValueHandling.Ignore)]
-    public bool HasGovernanceAddress { get; set; }
 
     [JsonProperty(DefaultValueHandling = DefaultValueHandling.IgnoreAndPopulate)]
     [DefaultValue(1.0d)]
     public double ShareMultiplier { get; set; } = 1.0d;
-
-    [JsonProperty(DefaultValueHandling = DefaultValueHandling.Ignore)]
-    public bool HasMWEB { get; set; }
 
     /// <summary>
     /// Bech32Prefix of a valid address
@@ -294,7 +214,7 @@ public partial class BitcoinTemplate : CoinTemplate
     public Dictionary<string, BitcoinNetworkParams> Networks { get; set; }
 
     [JsonProperty(NullValueHandling = NullValueHandling.Ignore)]
-    public int? CoinbaseMinConfimations { get; set; }
+    public int? CoinbaseMinConfirmations { get; set; }
 
     [JsonProperty(NullValueHandling = NullValueHandling.Ignore)]
     public string BlockSerializer { get; set; }
@@ -309,418 +229,10 @@ public partial class BitcoinTemplate : CoinTemplate
     /// Amount of decimals used for payouts
     /// </summary>
     [JsonProperty(NullValueHandling = NullValueHandling.Ignore)]
-    public int? PayoutDecimalPlaces { get; set; } = 4;
-}
-
-public enum ConcealSubfamily
-{
-    [EnumMember(Value = "none")]
-    None,
-}
-
-public partial class ConcealCoinTemplate : CoinTemplate
-{
-    [JsonProperty(Order = -7, DefaultValueHandling = DefaultValueHandling.IgnoreAndPopulate)]
-    [DefaultValue(ConcealSubfamily.None)]
-    [JsonConverter(typeof(StringEnumConverter), true)]
-    public ConcealSubfamily Subfamily { get; set; }
-
-    /// <summary>
-    /// Broader Cryptonight hash family
-    /// </summary>
-    [JsonConverter(typeof(StringEnumConverter), true)]
-    [JsonProperty(Order = -5)]
-    public CryptonightHashType Hash { get; set; }
-
-    /// <summary>
-    /// Broader Cryptonight hash variant
-    /// </summary>
-    [JsonProperty(Order = -4, DefaultValueHandling = DefaultValueHandling.Include)]
-    public int HashVariant { get; set; }
-    
-    /// <summary>
-    /// Blob type in order to build the correct blob from blobtemplate
-    /// </summary>
-    [JsonProperty(Order = -4, DefaultValueHandling = DefaultValueHandling.Include)]
-    public int BlobType { get; set; }
-    
-    /// <summary>
-    /// Conceal network hashrate = `Difficulty / DifficultyTarget`
-    /// See: parameter -> DIFFICULTY_TARGET in src/CryptoNoteConfig.h
-    /// </summary>
-    public ulong DifficultyTarget { get; set; }
-    
-    /// <summary>
-    /// Smallest unit for Blockreward formatting
-    /// </summary>
-    public decimal SmallestUnit { get; set; }
-
-    /// <summary>
-    /// Prefix of a valid address
-    /// See: parameter -> CRYPTONOTE_PUBLIC_ADDRESS_BASE58_PREFIX in src/CryptoNoteConfig.h
-    /// </summary>
-    public ulong AddressPrefix { get; set; }
-
-    /// <summary>
-    /// Prefix of a valid testnet-address
-    /// See: parameter -> CRYPTONOTE_PUBLIC_ADDRESS_BASE58_PREFIX in src/CryptoNoteConfig.h
-    /// </summary>
-    public ulong AddressPrefixTestnet { get; set; }
-
-    /// <summary>
-    /// Prefix of a valid integrated address
-    /// See: parameter -> CRYPTONOTE_PUBLIC_ADDRESS_BASE58_PREFIX in src/CryptoNoteConfig.h
-    /// </summary>
-    public ulong AddressPrefixIntegrated { get; set; }
-
-    /// <summary>
-    /// Prefix of a valid integrated testnet-address
-    /// See: parameter -> CRYPTONOTE_PUBLIC_ADDRESS_BASE58_PREFIX in src/CryptoNoteConfig.h
-    /// </summary>
-    public ulong AddressPrefixIntegratedTestnet { get; set; }
-
-    /// <summary>
-    /// Fraction of block reward, the pool really gets to keep
-    /// </summary>
-    [JsonProperty(DefaultValueHandling = DefaultValueHandling.IgnoreAndPopulate)]
-    [DefaultValue(1.0d)]
-    public decimal BlockrewardMultiplier { get; set; }
-}
-
-public enum CryptonoteSubfamily
-{
-    [EnumMember(Value = "none")]
-    None,
-}
-
-public enum CryptonightHashType
-{
-    [EnumMember(Value = "randomx")]
-    RandomX,
-
-    [EnumMember(Value = "randomarq")]
-    RandomARQ,
-
-    [EnumMember(Value = "randomscash")]
-    RandomSCASH,
-
-    [EnumMember(Value = "randomxeq")]
-    RandomXEQ,
-
-    [EnumMember(Value = "panthera")]
-    Panthera,
-
-    [EnumMember(Value = "cn0")]
-    Cryptonight0,
-
-    [EnumMember(Value = "cn1")]
-    Cryptonight1,
-
-    [EnumMember(Value = "cn2")]
-    Cryptonight2,
-
-    [EnumMember(Value = "cn-half")]
-    CryptonightHalf,
-
-    [EnumMember(Value = "cn-double")]
-    CryptonightDouble,
-
-    [EnumMember(Value = "cn-r")]
-    CryptonightR,
-
-    [EnumMember(Value = "cn-rto")]
-    CryptonightRTO,
-
-    [EnumMember(Value = "cn-rwz")]
-    CryptonightRWZ,
-
-    [EnumMember(Value = "cn-zls")]
-    CryptonightZLS,
-
-    [EnumMember(Value = "cn-ccx")]
-    CryptonightCCX,
-
-    [EnumMember(Value = "cn-gpu")]
-    CryptonightGPU,
-
-    [EnumMember(Value = "cn-fast")]
-    CryptonightFast,
-
-    [EnumMember(Value = "cn-xao")]
-    CryptonightXAO,
-
-    [EnumMember(Value = "flex")]
-    Flex,
-
-    [EnumMember(Value = "gr")]
-    Ghostrider,
-
-    [EnumMember(Value = "mike")]
-    Mike,
-
-    [EnumMember(Value = "cn_lite0")]
-    CryptonightLite0,
-
-    [EnumMember(Value = "cn_lite1")]
-    CryptonightLite1,
-
-    [EnumMember(Value = "cn_heavy")]
-    CryptonightHeavy,
-
-    [EnumMember(Value = "cn_heavy_xhv")]
-    CryptonightHeavyXHV,
-
-    [EnumMember(Value = "cn_heavy_tube")]
-    CryptonightHeavyTube,
-
-    [EnumMember(Value = "cn_pico")]
-    CryptonightPico,
-
-    [EnumMember(Value = "argon_chukwa")]
-    ArgonCHUKWA,
-
-    [EnumMember(Value = "argon_chukwa_v2")]
-    ArgonCHUKWAV2,
-
-    [EnumMember(Value = "argon_wrkz")]
-    ArgonWRKZ,
-}
-
-public partial class CryptonoteCoinTemplate : CoinTemplate
-{
-    [JsonProperty(Order = -7, DefaultValueHandling = DefaultValueHandling.IgnoreAndPopulate)]
-    [DefaultValue(CryptonoteSubfamily.None)]
-    [JsonConverter(typeof(StringEnumConverter), true)]
-    public CryptonoteSubfamily Subfamily { get; set; }
-
-    /// <summary>
-    /// Broader Cryptonight hash family
-    /// </summary>
-    [JsonConverter(typeof(StringEnumConverter), true)]
-    [JsonProperty(Order = -5)]
-    public CryptonightHashType Hash { get; set; }
-
-    /// <summary>
-    /// Broader Cryptonight hash variant
-    /// </summary>
-    [JsonProperty(Order = -4, DefaultValueHandling = DefaultValueHandling.Include)]
-    public int HashVariant { get; set; }
-    
-    /// <summary>
-    /// Blob type in order to build the correct blob from blobtemplate
-    /// </summary>
-    [JsonProperty(Order = -4, DefaultValueHandling = DefaultValueHandling.Include)]
-    public int BlobType { get; set; }
-
-    /// <summary>
-    /// Smallest unit for Blockreward formatting
-    /// </summary>
-    public decimal SmallestUnit { get; set; }
-
-    /// <summary>
-    /// Prefix of a valid address
-    /// See: namespace config -> CRYPTONOTE_PUBLIC_ADDRESS_BASE58_PREFIX in src/cryptonote_config.h
-    /// </summary>
-    public ulong AddressPrefix { get; set; }
-
-    /// <summary>
-    /// Sub Prefix of a valid sub address
-    /// See: namespace config -> CRYPTONOTE_PUBLIC_SUBADDRESS_BASE58_PREFIX in src/cryptonote_config.h
-    /// </summary>
-    public ulong SubAddressPrefix { get; set; }
-
-    /// <summary>
-    /// Prefix of a valid testnet-address
-    /// See: namespace config -> CRYPTONOTE_PUBLIC_ADDRESS_BASE58_PREFIX in src/cryptonote_config.h
-    /// </summary>
-    public ulong AddressPrefixTestnet { get; set; }
-
-    /// <summary>
-    /// Sub Prefix of a valid testnet-address
-    /// See: namespace config -> CRYPTONOTE_PUBLIC_SUBADDRESS_BASE58_PREFIX in src/cryptonote_config.h
-    /// </summary>
-    public ulong SubAddressPrefixTestnet { get; set; }
-
-    /// <summary>
-    /// Prefix of a valid stagenet-address
-    /// See: namespace config -> CRYPTONOTE_PUBLIC_ADDRESS_BASE58_PREFIX in src/cryptonote_config.h
-    /// </summary>
-    public ulong AddressPrefixStagenet { get; set; }
-
-    /// <summary>
-    /// Sub Prefix of a valid stagenet-address
-    /// See: namespace config -> CRYPTONOTE_PUBLIC_SUBADDRESS_BASE58_PREFIX in src/cryptonote_config.h
-    /// </summary>
-    public ulong SubAddressPrefixStagenet { get; set; }
-
-    /// <summary>
-    /// Prefix of a valid integrated address
-    /// See: namespace testnet -> CRYPTONOTE_PUBLIC_INTEGRATED_ADDRESS_BASE58_PREFIX  in src/cryptonote_config.h
-    /// </summary>
-    public ulong AddressPrefixIntegrated { get; set; }
-
-    /// <summary>
-    /// Prefix of a valid integrated stagenet-address
-    /// See: namespace testnet -> CRYPTONOTE_PUBLIC_ADDRESS_BASE58_PREFIX in src/cryptonote_config.h
-    /// </summary>
-    public ulong AddressPrefixIntegratedStagenet { get; set; }
-
-    /// <summary>
-    /// Prefix of a valid integrated testnet-address
-    /// See: namespace testnet -> CRYPTONOTE_PUBLIC_ADDRESS_BASE58_PREFIX in src/cryptonote_config.h
-    /// </summary>
-    public ulong AddressPrefixIntegratedTestnet { get; set; }
-
-    /// <summary>
-    /// Fraction of block reward, the pool really gets to keep
-    /// </summary>
-    [JsonProperty(DefaultValueHandling = DefaultValueHandling.IgnoreAndPopulate)]
-    [DefaultValue(1.0d)]
-    public decimal BlockrewardMultiplier { get; set; }
+    public int? PayoutDecimalPlaces { get; set; } = 8;
 
     [JsonProperty(NullValueHandling = NullValueHandling.Ignore)]
-    public int? CoinbaseMinConfimations { get; set; }
-
-}
-
-public enum EquihashSubfamily
-{
-    [EnumMember(Value = "none")]
-    None,
-}
-
-public partial class EquihashCoinTemplate : CoinTemplate
-{
-    public partial class EquihashNetworkParams
-    {
-        public string Diff1 { get; set; }
-
-        public int SolutionSize { get; set; } = 1344;
-        public int SolutionPreambleSize { get; set; } = 3;
-        public JObject Solver { get; set; }
-        public string CoinbaseTxNetwork { get; set; }
-
-        public bool PayFoundersReward { get; set; }
-        public bool PayFundingStream { get; set; }
-
-        // zencash fonder reward
-        public bool vOuts { get; set; }
-
-        [JsonProperty(DefaultValueHandling = DefaultValueHandling.Ignore)]
-        public decimal vPercentFoundersReward { get; set; }
-
-        [JsonProperty(DefaultValueHandling = DefaultValueHandling.Ignore)]
-        public string vTreasuryRewardAddress { get; set; }
-
-        [JsonProperty(DefaultValueHandling = DefaultValueHandling.Ignore)]
-        public decimal vPercentTreasuryReward { get; set; }
-
-        [JsonProperty(DefaultValueHandling = DefaultValueHandling.Ignore)]
-        public string vSecureNodesRewardAddress { get; set; }
-
-        [JsonProperty(DefaultValueHandling = DefaultValueHandling.Ignore)]
-        public decimal percentSecureNodesReward { get; set; }
-
-        [JsonProperty(DefaultValueHandling = DefaultValueHandling.Ignore)]
-        public string vSuperNodesRewardAddress { get; set; }
-
-        [JsonProperty(DefaultValueHandling = DefaultValueHandling.Ignore)]
-        public decimal percentSuperNodesReward { get; set; }
-
-        // zencash founder reward
-
-        [JsonProperty(DefaultValueHandling = DefaultValueHandling.Ignore)]
-        public decimal PercentFoundersReward { get; set; }
-
-        [JsonProperty(DefaultValueHandling = DefaultValueHandling.Ignore)]
-        public string[] FoundersRewardAddresses { get; set; }
-
-        [JsonProperty(DefaultValueHandling = DefaultValueHandling.Ignore)]
-        public ulong FoundersRewardSubsidySlowStartInterval { get; set; }
-
-        [JsonProperty(DefaultValueHandling = DefaultValueHandling.Ignore)]
-        public ulong FoundersRewardSubsidyHalvingInterval { get; set; }
-
-        [JsonProperty(DefaultValueHandling = DefaultValueHandling.Ignore)]
-        public decimal PercentTreasuryReward { get; set; }
-
-        [JsonProperty(DefaultValueHandling = DefaultValueHandling.Ignore)]
-        public ulong TreasuryRewardStartBlockHeight { get; set; }
-
-        [JsonProperty(DefaultValueHandling = DefaultValueHandling.Ignore)]
-        public string[] TreasuryRewardAddresses { get; set; }
-
-        [JsonProperty(DefaultValueHandling = DefaultValueHandling.Ignore)]
-        public double TreasuryRewardAddressChangeInterval { get; set; }
-
-        // ZCash "Overwinter"
-        [JsonProperty(DefaultValueHandling = DefaultValueHandling.Ignore)]
-        public uint? OverwinterActivationHeight { get; set; }
-
-        [JsonProperty(DefaultValueHandling = DefaultValueHandling.Ignore)]
-        public uint? OverwinterTxVersion { get; set; }
-
-        [JsonProperty(DefaultValueHandling = DefaultValueHandling.Ignore)]
-        public uint? OverwinterTxVersionGroupId { get; set; }
-
-        // ZCash "Sapling"
-        [JsonProperty(DefaultValueHandling = DefaultValueHandling.Ignore)]
-        public uint? SaplingActivationHeight { get; set; }
-
-        [JsonProperty(DefaultValueHandling = DefaultValueHandling.Ignore)]
-        public uint? SaplingTxVersion { get; set; }
-
-        [JsonProperty(DefaultValueHandling = DefaultValueHandling.Ignore)]
-        public uint? SaplingTxVersionGroupId { get; set; }
-    }
-
-    [JsonProperty(Order = -7, DefaultValueHandling = DefaultValueHandling.IgnoreAndPopulate)]
-    [DefaultValue(EquihashSubfamily.None)]
-    [JsonConverter(typeof(StringEnumConverter), true)]
-    public EquihashSubfamily Subfamily { get; set; }
-
-    public Dictionary<string, EquihashNetworkParams> Networks { get; set; }
-    public bool UsesZCashAddressFormat { get; set; } = true;
-
-    /// <summary>
-    /// Force use of BitcoinPayoutHandler instead of EquihashPayoutHandler
-    /// </summary>
-    public bool UseBitcoinPayoutHandler { get; set; }
-}
-
-public partial class ErgoCoinTemplate : CoinTemplate
-{
-}
-
-public enum EthereumSubfamily
-{
-    [EnumMember(Value = "none")]
-    None,
-}
-
-public partial class EthereumCoinTemplate : CoinTemplate
-{
-    [JsonProperty(Order = -7, DefaultValueHandling = DefaultValueHandling.IgnoreAndPopulate)]
-    [DefaultValue(EthereumSubfamily.None)]
-    [JsonConverter(typeof(StringEnumConverter), true)]
-    public EthereumSubfamily Subfamily { get; set; }
-    
-    /// <summary>
-    /// Which hashing algorithm to use. (ethash, etchash, ubqhash or ethashb3)
-    /// </summary>
-    public string Ethasher { get; set; } = "ethash";
-}
-
-public partial class KaspaCoinTemplate : CoinTemplate
-{
-}
-
-public partial class ProgpowCoinTemplate : BitcoinTemplate
-{
-    /// <summary>
-    /// Which hashing algorithm to use. (kawpow or firopow)
-    /// </summary>
-    public string Progpower { get; set; } = "kawpow";
+    public ExtendedMaturityConfig ExtendedMaturity { get; set; }
 }
 
 #endregion // Coin Definitions
@@ -795,54 +307,19 @@ public class DatabaseConfig : AuthenticatedNetworkEndpointConfig
 
 public class PostgresConfig : DatabaseConfig
 {
-    /// <summary>
-    /// Enable Transport layer security (TLS)
-    /// </summary>
     public bool Tls { get; set; }
-
-    /// <summary>
-    /// Location of a client certificate to be sent to the server (.PFX or .PEM)
-    /// </summary>
     public string TlsCert { get; set; }
-
-    /// <summary>
-    /// Location of a client certificate private key to be sent to the server
-    /// </summary>
     public string TlsKey { get; set; }
-
-    /// <summary>
-    /// Client certificate password
-    /// </summary>
     public string TlsPassword { get; set; }
-
-    /// <summary>
-    /// Trust (self-signed) server certificate
-    /// </summary>
     public bool TlsNoValidate { get; set; }
-
     public int? CommandTimeout { get; set; }
-
-    /// <summary>
-    /// Enable Enabling Npgsql Legacy Timestamp Behavior
-    /// </summary>
     public bool? EnableLegacyTimestamps { get; set; }
 }
 
 public class TcpProxyProtocolConfig
 {
-    /// <summary>
-    /// Enable for client IP addresses to be detected when using a load balancer with TCP proxy protocol enabled, such as HAProxy.
-    /// </summary>
     public bool Enable { get; set; }
-
-    /// <summary>
-    /// Terminate connections that are not beginning with a proxy-protocol header
-    /// </summary>
     public bool Mandatory { get; set; }
-
-    /// <summary>
-    /// List of IP addresses of valid proxy addresses. If absent, localhost is used
-    /// </summary>
     public string[] ProxyAddresses { get; set; }
 }
 
@@ -853,61 +330,19 @@ public class PoolEndpoint
     public double Difficulty { get; set; }
     public TcpProxyProtocolConfig TcpProxyProtocol { get; set; }
     public VarDiffConfig VarDiff { get; set; }
-
-    /// <summary>
-    /// Enable Transport layer security (TLS)
-    /// If set to true, you must specify values for either TlsPemFile or TlsPfxFile
-    /// If TlsPemFile does not include the private key, TlsKeyFile is also required
-    /// </summary>
     public bool Tls { get; set; }
-
-    /// <summary>
-    /// Enable TLS sniffing
-    /// Check incoming stratum connections for TLS handshake indicator and default to non-TLS if not present
-    /// </summary>
     public bool TlsAuto { get; set; }
-
-    /// <summary>
-    /// PKCS certificate file
-    /// </summary>
     public string TlsPfxFile { get; set; }
-
-    /// <summary>
-    /// Certificate file password
-    /// </summary>
     public string TlsPfxPassword { get; set; }
 }
 
 public partial class VarDiffConfig
 {
-    /// <summary>
-    /// Minimum difficulty
-    /// </summary>
     public double MinDiff { get; set; }
-
-    /// <summary>
-    /// Network difficulty will be used if it is lower than this
-    /// </summary>
     public double? MaxDiff { get; set; }
-
-    /// <summary>
-    /// Do not alter difficulty by more than this during a single retarget in either direction
-    /// </summary>
     public double? MaxDelta { get; set; }
-
-    /// <summary>
-    /// Try to get 1 share per this many seconds
-    /// </summary>
     public double TargetTime { get; set; }
-
-    /// <summary>
-    /// Check to see if we should retarget every this many seconds
-    /// </summary>
     public double RetargetTime { get; set; }
-
-    /// <summary>
-    /// Allow submission frequency to diverge this much (%) from target time without triggering a retarget
-    /// </summary>
     public double VariancePercent { get; set; }
 }
 
@@ -920,41 +355,28 @@ public enum BanManagerKind
 public class ClusterBanningConfig
 {
     public BanManagerKind? Manager { get; set; }
-
-    /// <summary>
-    /// Ban clients sending non-json or invalid json
-    /// </summary>
     public bool? BanOnJunkReceive { get; set; }
-
-    /// <summary>
-    /// Ban miners for crossing invalid share threshold
-    /// </summary>
     public bool? BanOnInvalidShares { get; set; }
-
-    /// <summary>
-    /// Ban clients sending invalid logins
-    /// </summary>
     public bool? BanOnLoginFailure { get; set; }
 }
 
 public partial class PoolShareBasedBanningConfig
 {
     public bool Enabled { get; set; }
-    public int CheckThreshold { get; set; } // Check stats when this many shares have been submitted
-    public double InvalidPercent { get; set; } // What percent of invalid shares triggers ban
-    public int Time { get; set; } // How many seconds to ban worker for
+    public int CheckThreshold { get; set; }
+    public double InvalidPercent { get; set; }
+    public int Time { get; set; }
+    public double? MinerEffortPercent { get; set; }
+    public int? MinerEffortTime { get; set; }
 }
 
 public partial class PoolPaymentProcessingConfig
 {
     public bool Enabled { get; set; }
-    public decimal MinimumPayment { get; set; } // in pool-base-currency (ie. Bitcoin, not Satoshis)
+    public decimal MinimumPayment { get; set; }
     public PayoutScheme PayoutScheme { get; set; }
     public JToken PayoutSchemeConfig { get; set; }
 
-    /// <summary>
-    /// Arbitrary extension data
-    /// </summary>
     [JsonExtensionData]
     public IDictionary<string, object> Extra { get; set; }
 }
@@ -965,9 +387,9 @@ public partial class ClusterPaymentProcessingConfig
     public int Interval { get; set; }
 
     /// <summary>
-    /// Indentifier used in coinbase transactions to identify the pool
+    /// Identifier used in coinbase transactions to identify the pool
     /// </summary>
-    public string CoinbaseString  { get; set; }
+    public string CoinbaseString { get; set; }
 }
 
 public partial class PersistenceConfig
@@ -979,10 +401,6 @@ public class RewardRecipient
 {
     public string Address { get; set; }
     public decimal Percentage { get; set; }
-
-    /// <summary>
-    /// Optional recipient type
-    /// </summary>
     public string Type { get; set; }
 }
 
@@ -1010,7 +428,6 @@ public partial class AdminNotifications
 public partial class NotificationsConfig
 {
     public bool Enabled { get; set; }
-
     public EmailSenderConfig Email { get; set; }
     public PushoverConfig Pushover { get; set; }
     public AdminNotifications Admin { get; set; }
@@ -1019,7 +436,6 @@ public partial class NotificationsConfig
 public class ApiRateLimitConfig
 {
     public bool Disabled { get; set; }
-
     public RateLimitRule[] Rules { get; set; }
     public string[] IpWhitelist { get; set; }
 }
@@ -1031,135 +447,69 @@ public class ApiTlsConfig
     public string TlsPfxPassword { get; set; }
 }
 
-
 public partial class ApiConfig
 {
     public bool Enabled { get; set; }
     public string ListenAddress { get; set; }
     public int Port { get; set; }
-
     public ApiTlsConfig Tls { get; set; }
-
     public ApiRateLimitConfig RateLimiting { get; set; }
-
-    /// <summary>
-    /// Port for admin-apis
-    /// </summary>
     public int? AdminPort { get; set; }
-
-    /// <summary>
-    /// Port for prometheus compatible metrics endpoint /metrics
-    /// </summary>
     public int? MetricsPort { get; set; }
-
-    /// <summary>
-    /// Restricts access to the admin API to these IP addresses
-    /// If this list null or empty, the default is 127.0.0.1
-    /// </summary>
     public string[] AdminIpWhitelist { get; set; }
-
-    /// <summary>
-    /// Restricts access to the /metrics endpoint to these IP addresses
-    /// If this list null or empty, the default is 127.0.0.1
-    /// </summary>
     public string[] MetricsIpWhitelist { get; set; }
+    public bool LegacyNullValueHandling { get; set; }
 
     /// <summary>
-    /// Enable serialization of null values in API responses
+    /// Disable built-in CORS headers. Set to true when a reverse proxy (e.g. nginx) manages CORS.
     /// </summary>
-    public bool LegacyNullValueHandling { get; set; }
+    public bool NoCors { get; set; }
 }
 
 public class ZmqPubSubEndpointConfig
 {
     public string Url { get; set; }
     public string Topic { get; set; }
-
-    // Curve Transport Layer Security Encryption key shared by client and server
     public string SharedEncryptionKey { get; set; }
 }
 
 public class ShareRelayEndpointConfig
 {
     public string Url { get; set; }
-
-    /// <summary>
-    /// Curve Transport Layer Security Encryption key shared by client and server
-    /// </summary>
     public string SharedEncryptionKey { get; set; }
 }
 
 public class ShareRelayConfig
 {
     public string PublishUrl { get; set; }
-
-    /// <summary>
-    /// If set to true, the relay will "Connect" to the url, rather than "Bind" it
-    /// </summary>
     public bool Connect { get; set; }
-
-    // Curve Transport Layer Security Encryption key shared by client and server
     public string SharedEncryptionKey { get; set; }
 }
 
 public class Statistics
 {
-    /// <summary>
-    /// Statistics update interval in seconds
-    /// </summary>
     public int? UpdateInterval { get; set; }
-
-    /// <summary>
-    /// Time window of shares to take into account when calculating - in minutes
-    /// </summary>
     public int? HashrateCalculationWindow { get; set; }
-
-    /// <summary>
-    /// Stats cleanup interval in hours
-    /// </summary>
     public int? GcInterval { get; set; }
-
-    /// <summary>
-    /// Time window in days of stats to discard when cleaning up periodically
-    /// </summary>
     public int? CleanupDays { get; set; }
-
 }
 
 public class NicehashClusterConfig
 {
-    /// <summary>
-    /// If set to true, the Nicehash service will be started
-    /// </summary>
     public bool EnableAutoDiff { get; set; }
 }
 
 public class ClusterMemoryConfig
 {
-    /// <summary>
-    /// RecyclableMemoryStream MaximumFreeSmallPoolBytes
-    /// WARNING: Don't use this if you don't know what you are doing
-    /// </summary>
     public int? RmsmMaximumFreeSmallPoolBytes { get; set; }
-
-    /// <summary>
-    /// RecyclableMemoryStream MaximumFreeLargePoolBytes
-    /// WARNING: Don't use this if you don't know what you are doing
-    /// </summary>
     public int? RmsmMaximumFreeLargePoolBytes { get; set; }
 }
 
 public partial class PoolConfig
 {
-    /// <summary>
-    /// unique id
-    /// </summary>
     [Required]
     public string Id { get; set; }
 
-    /// <summary>
-    /// Coin template reference
-    /// </summary>
     [Required]
     public string Coin { get; set; }
 
@@ -1175,40 +525,32 @@ public partial class PoolConfig
     public PoolShareBasedBanningConfig Banning { get; set; }
     public RewardRecipient[] RewardRecipients { get; set; }
     public string Address { get; set; }
-    public string PubKey { get; set; }  // POS coins only
+    public string PubKey { get; set; }
     public int ClientConnectionTimeout { get; set; }
     public int JobRebroadcastTimeout { get; set; }
     public int BlockRefreshInterval { get; set; }
 
-    /// <summary>
-    /// If true, internal stratum ports are not initialized
-    /// </summary>
     public bool? EnableInternalStratum { get; set; }
 
-    /// <summary>
-    /// Interval in seconds for performing sweeps over connected miners operating on a too high diff to submit shares and adjust varDiff down
-    /// </summary>
     public int? VardiffIdleSweepInterval { get; set; }
 
     /// <summary>
-    /// Arbitrary extension data
+    /// Purely informational. List of hostnames where this pool's stratum endpoints can be
+    /// reached (e.g. "mining.bitwebcore.net"). Not used by any pool/API logic — passed through
+    /// to the API response so the frontend can display connection info without hardcoding it.
+    /// Allows the pool's mining domain(s) to differ from the domain the API itself is served on,
+    /// and to be changed/extended (e.g. additional "mining2.bitwebcore.net") without a frontend deploy.
     /// </summary>
+    public string[] MiningDomains { get; set; }
+
     [JsonExtensionData]
     public IDictionary<string, object> Extra { get; set; }
 }
 
 public partial class ClusterConfig
 {
-    /// <summary>
-    /// cluster instance id (only used in clustering setups)
-    /// </summary>
     public byte? InstanceId { get; set; }
-
-    /// <summary>
-    /// One or more files containing coin definitions
-    /// </summary>
     public string[] CoinTemplates { get; set; }
-
     public string ClusterName { get; set; }
     public ClusterLoggingConfig Logging { get; set; }
     public ClusterBanningConfig Banning { get; set; }
@@ -1219,30 +561,8 @@ public partial class ClusterConfig
     public Statistics Statistics { get; set; }
     public NicehashClusterConfig Nicehash { get; set; }
     public ClusterMemoryConfig Memory { get; set; }
-
-    /// <summary>
-    /// If this is enabled, shares are not written to the database
-    /// but published on the specified ZeroMQ Url and using the
-    /// poolid as topic
-    /// </summary>
     public ShareRelayConfig ShareRelay { get; set; }
-
-    /// <summary>
-    /// External relays to monitor for shares (see option above)
-    /// </summary>
     public ShareRelayEndpointConfig[] ShareRelays { get; set; }
-
-    /// <summary>
-    /// Maximum parallelism of Equihash solver
-    /// Increasing this value by one, increases pool peak memory consumption by 1 GB
-    /// </summary>
-    public int? EquihashMaxThreads { get; set; }
-
-    /// <summary>
-    /// Cryptonight maximum parallelism
-    /// </summary>
-    public int? CryptonightMaxThreads { get; set; }
-
     public string ShareRecoveryFile { get; set; }
 
     [Required]

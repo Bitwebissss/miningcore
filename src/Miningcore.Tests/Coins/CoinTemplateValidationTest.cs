@@ -21,7 +21,6 @@ public class CoinTemplateValidationTest : TestBase
     public void Validate_Coin_Templates()
     {
         var cft = typeof(CoinFamily).GetTypeInfo();
-        var cryptonightHashType = typeof(CryptonightHashType).GetTypeInfo();
 
         foreach(var template in ModuleInitializer.CoinTemplates)
         {
@@ -49,13 +48,6 @@ public class CoinTemplateValidationTest : TestBase
 
                     if(bt.PoSBlockHasher != null)
                         Assert.Null(Record.Exception(() => bt.PoSBlockHasherValue));
-                    break;
-                }
-
-                case CryptonoteCoinTemplate cnt when t is CryptonoteCoinTemplate:
-                {
-                    Assert.NotNull(cryptonightHashType.DeclaredMembers.SingleOrDefault(x => x.Name == cnt.Hash.ToString())?.GetCustomAttribute<EnumMemberAttribute>(false));
-
                     break;
                 }
             }
