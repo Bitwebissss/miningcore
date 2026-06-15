@@ -1,7 +1,7 @@
 [![license](https://img.shields.io/github/license/mashape/apistatus.svg)]()
 [![.NET](https://github.com/bitweb-project/miningcore/actions/workflows/dotnet.yml/badge.svg?branch=dev)](https://github.com/bitweb-project/miningcore/actions/workflows/dotnet.yml)
 
-<img src="https://github.com/bitweb-project/miningcore/raw/master/logo.png" width="150">
+<img src="https://github.com/bitweb-project/miningcore/blob/dev/logo.svg" width="150">
 
 ### Features
 
