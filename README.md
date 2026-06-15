@@ -1,5 +1,5 @@
 [![license](https://img.shields.io/github/license/mashape/apistatus.svg)]()
-[![.NET](https://github.com/bitweb-project/miningcore/actions/workflows/dotnet.yml/badge.svg)](https://github.com/bitweb-project/miningcore/actions/workflows/dotnet.yml)
+[![.NET](https://github.com/bitweb-project/miningcore/actions/workflows/dotnet.yml/badge.svg?branch=dev)](https://github.com/bitweb-project/miningcore/actions/workflows/dotnet.yml)
 
 <img src="https://github.com/bitweb-project/miningcore/raw/master/logo.png" width="150">
 
@@ -12,7 +12,7 @@
 - Session management for purging DDoS/flood initiated zombie workers
 - Payment processing
 - Banning System
-- Live Stats [API](https://github.com/oliverw/miningcore/wiki/API) on Port 4000
+- Live Stats [API](https://pool.bitwebcore.net/api)
 - WebSocket streaming of notable events like Blocks found, Blocks unlocked, Payments and more
 - Detailed per-pool logging to console & filesystem
 - Runs on Linux and Windows
