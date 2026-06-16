@@ -1,4 +1,4 @@
-[![license](https://img.shields.io/github/license/mashape/apistatus.svg)](https://github.com/bitweb-project/miningcore/blob/dev/LICENSE)
+[![license](https://img.shields.io/github/license/bitweb-project/miningcore)](https://github.com/bitweb-project/miningcore/blob/dev/LICENSE)
 [![.NET](https://github.com/bitweb-project/miningcore/actions/workflows/dotnet.yml/badge.svg?branch=dev)](https://github.com/bitweb-project/miningcore/actions/workflows/dotnet.yml)
 
 <img src="https://github.com/bitweb-project/miningcore/blob/dev/logo.svg" width="150">
