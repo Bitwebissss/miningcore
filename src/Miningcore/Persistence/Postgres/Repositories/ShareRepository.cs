@@ -1,4 +1,5 @@
 using System.Data;
+using System.Linq;
 using MapsterMapper;
 using Dapper;
 using Miningcore.Persistence.Model;
@@ -28,9 +29,15 @@ public class ShareRepository : IShareRepository
         const string query = @"COPY shares (poolid, blockheight, difficulty,
             networkdifficulty, miner, worker, useragent, ipaddress, source, created, mpassword) FROM STDIN (FORMAT BINARY)";
 
+        // Drop shares with invalid networkdifficulty (<=0, NaN, Infinity) before they
+        // reach the DB. Mirrors the guard already applied at read-time (aggregate
+        // queries) and in the payout schemes, closing the write-time gap.
+        var validShares = shares.Where(s => s.NetworkDifficulty > 0 &&
+            !double.IsNaN(s.NetworkDifficulty) && !double.IsInfinity(s.NetworkDifficulty)).ToArray();
+
         await using(var writer = await pgCon.BeginBinaryImportAsync(query, ct))
         {
-            foreach(var share in shares)
+            foreach(var share in validShares)
             {
                 await writer.StartRowAsync(ct);
 
