@@ -196,6 +196,15 @@ public class PPLNSBFPaymentScheme : IPayoutScheme
                 // record attributed shares for diagnostic purposes
                 shares[address] = shares.TryGetValue(address, out var e2) ? e2 + shareDiffAdjusted : shareDiffAdjusted;
 
+                // Guard: never divide by a corrupted/zero NetworkDifficulty. Skip the
+                // share rather than substitute a value — a substitute would inflate
+                // this miner's score at everyone else's expense.
+                if(share.NetworkDifficulty <= 0 || double.IsNaN(share.NetworkDifficulty) || double.IsInfinity(share.NetworkDifficulty))
+                {
+                    logger.Warn(() => $"Excluding share from {address} (pool {poolConfig.Id}, block {block.BlockHeight}) from PPLNSBF scoring: invalid NetworkDifficulty ({share.NetworkDifficulty})");
+                    continue;
+                }
+
                 var score = (decimal) (shareDiffAdjusted / share.NetworkDifficulty);
 
                 // if accumulated score would cross threshold, cap it to the remaining value

@@ -176,6 +176,15 @@ public class PROPPaymentScheme : IPayoutScheme
                 // record attributed shares for diagnostic purposes
                 shares[address] = shares.TryGetValue(address, out var e2) ? e2 + shareDiffAdjusted : shareDiffAdjusted;
 
+                // Guard: never divide by a corrupted/zero NetworkDifficulty. Skip the
+                // share rather than substitute a value — a substitute would inflate
+                // this miner's score at everyone else's expense.
+                if(share.NetworkDifficulty <= 0 || double.IsNaN(share.NetworkDifficulty) || double.IsInfinity(share.NetworkDifficulty))
+                {
+                    logger.Warn(() => $"Excluding share from {address} (pool {poolConfig.Id}, block {block.BlockHeight}) from PROP scoring: invalid NetworkDifficulty ({share.NetworkDifficulty})");
+                    continue;
+                }
+
                 var score = (decimal) (shareDiffAdjusted / share.NetworkDifficulty);
 
                 scores[address] = scores.TryGetValue(address, out var e3) ? e3 + score : score;

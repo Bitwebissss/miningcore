@@ -443,6 +443,18 @@ public class BitcoinJob
 
         Difficulty = new Target(System.Numerics.BigInteger.Parse(BlockTemplate.Target, NumberStyles.HexNumber)).Difficulty;
 
+        // Guard: a malformed/degenerate BlockTemplate.Target (e.g. daemon returning
+        // Target = 0 or the max 256-bit value during a bad getblocktemplate response)
+        // computes to Difficulty <= 0, NaN or Infinity. Every downstream consumer
+        // (share validation, stats, PPLNS/PROP payout scoring) divides by this value,
+        // so an invalid Difficulty here is the root cause of "division by zero" further
+        // down the pipeline. Reject the job outright rather than propagate a bad value —
+        // UpdateJob's catch(Exception) logs this and keeps serving the last valid job,
+        // so miners keep working off good data instead of a poisoned one.
+        if(Difficulty <= 0 || double.IsNaN(Difficulty) || double.IsInfinity(Difficulty))
+            throw new InvalidOperationException(
+                $"Refusing job {jobId}: computed Difficulty is invalid ({Difficulty}) from target {BlockTemplate.Target}");
+
         extraNoncePlaceHolderLength = BitcoinConstants.ExtranoncePlaceHolderLength;
         this.isPoS = isPoS;
         this.shareMultiplier = shareMultiplier;
