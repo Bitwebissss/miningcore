@@ -189,7 +189,10 @@
       "hash": "sha256d"
     },
     "headerHasher": {
-      "hash": "dpowcoin"
+      "hash": "dpowcoin",
+      "args": [
+        4
+      ]
     },
     "blockHasher": {
       "hash": "reverse",

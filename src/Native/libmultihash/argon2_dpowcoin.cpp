@@ -31,6 +31,12 @@
  *
  *   argon2id_dpowcoin_export
  *       pwd = 80-byte serialised block header, output = 32 bytes.
+ *       threads: execution parallelism ONLY, not consensus-critical (see
+ *       note above ctx.threads below). Exposed as a parameter so it can be
+ *       tuned per-deployment from coins.json (headerHasher.args), the same
+ *       way Scrypt's (n, r) are - no native recompile needed to change it.
+ *       The node itself always uses threads=1; any value >=1 here produces
+ *       an identical hash, only the wall-clock time to compute it differs.
  */
 
 #include <cstdint>
@@ -114,11 +120,21 @@ static void argon2_dpowcoin_round(
  *   salt(round1) = SHA512(SHA512(header))   [64 bytes]
  *   salt(round2) = output of round 1        [32 bytes]
  *   pwd (both rounds) = 80-byte serialised block header
+ *
+ * `threads` is NOT consensus-critical (see note above ctx.threads in
+ * argon2_dpowcoin_round): it only controls how many CPU threads Argon2
+ * itself uses to fill memory for a SINGLE hash. Output is identical for
+ * any threads in [1, lanes] - lanes=2 here, so 1 or 2 are the only
+ * meaningful values; anything higher is silently no better than 2 but
+ * harmless (the backend just won't have more lanes to split across).
+ * Passed through from C# so it's configurable per-deployment via
+ * coins.json without touching this file.
  * ------------------------------------------------------------------------- */
 extern "C" MODULE_API void argon2id_dpowcoin_export(
         const char *input,
         char       *output,
-        uint32_t    input_len)   /* always 80 for PoW */
+        uint32_t    input_len,   /* always 80 for PoW */
+        uint32_t    threads)     /* execution parallelism only, see above */
 {
     ensure_argon2_dpowcoin_init();
 
@@ -140,7 +156,7 @@ extern "C" MODULE_API void argon2id_dpowcoin_export(
         input, input_len,
         salt64, 64,
         round1_out, 32,
-        /*t=*/2, /*m=*/4096, /*lanes=*/2, /*threads=*/2,
+        /*t=*/2, /*m=*/4096, /*lanes=*/2, threads,
         ARGON2_VERSION_NUMBER);
 
     /* Round 2 — salt is round 1's output */
@@ -148,6 +164,6 @@ extern "C" MODULE_API void argon2id_dpowcoin_export(
         input, input_len,
         round1_out, 32,
         output, 32,
-        /*t=*/2, /*m=*/32768, /*lanes=*/2, /*threads=*/2,
+        /*t=*/2, /*m=*/32768, /*lanes=*/2, threads,
         ARGON2_VERSION_NUMBER);
 }
